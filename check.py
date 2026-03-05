@@ -47,10 +47,10 @@ EXPECTED_SANDBOX_PACKAGES = {
     "tenacity",
     "python-dateutil",
     "rich",
-    "jsonschema",    "python-dotenv",
+    "jsonschema",
+    "python-dotenv",
     "loguru",
     "aiohttp",
-
 }
 
 
@@ -110,29 +110,35 @@ def _scan_for_secrets() -> None:
 def _scan_for_pyc() -> None:
     pyc = [p for p in _iter_repo_files() if p.suffix == ".pyc"]
     if pyc:
-        _warn(f"Found .pyc files (should not be committed): {[str(p.relative_to(REPO_ROOT)) for p in pyc][:5]}")
+        _warn(
+            f"Found .pyc files (should not be committed): {[str(p.relative_to(REPO_ROOT)) for p in pyc][:5]}"
+        )
 
 
 def _check_env_file() -> None:
-    env_path = REPO_ROOT / '.env'
+    env_path = REPO_ROOT / ".env"
     if not env_path.exists():
         return
 
     # If .env is tracked by git, this is almost certainly a submission footgun.
     try:
         r = subprocess.run(
-            ['git', '-C', str(REPO_ROOT), 'ls-files', '--error-unmatch', '.env'],
+            ["git", "-C", str(REPO_ROOT), "ls-files", "--error-unmatch", ".env"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
         )
         if r.returncode == 0:
-            _fail('.env is tracked by git. Remove it (and any secrets) before submission.')
+            _fail(
+                ".env is tracked by git. Remove it (and any secrets) before submission."
+            )
     except Exception:
         # If git isn't available, fall back to a warning.
         pass
 
-    _warn('.env exists in repo folder. Ensure it is gitignored and contains no secrets before submission.')
+    _warn(
+        ".env exists in repo folder. Ensure it is gitignored and contains no secrets before submission."
+    )
 
 
 def _load_module(path: Path, name: str):
@@ -217,7 +223,13 @@ def _parse_requirements_pkgs(req_text: str) -> set[str]:
         #   uvicorn[standard]>=0.23.0
         #   python-dateutil>=2.9.0.post0; python_version>='3.9'
         base = line.split(";", 1)[0].strip()
-        base = base.split("==", 1)[0].split(">=", 1)[0].split("<=", 1)[0].split("~=", 1)[0].strip()
+        base = (
+            base.split("==", 1)[0]
+            .split(">=", 1)[0]
+            .split("<=", 1)[0]
+            .split("~=", 1)[0]
+            .strip()
+        )
         name = base.split("[", 1)[0].strip().lower()
         if name:
             pkgs.add(name)
@@ -245,7 +257,9 @@ def main() -> None:
     if llm_gateway_py.exists():
         _ok("Found llm_gateway.py")
     else:
-        _warn("llm_gateway.py not found; ensure your agent injects IWA-Task-ID header in LLM calls")
+        _warn(
+            "llm_gateway.py not found; ensure your agent injects IWA-Task-ID header in LLM calls"
+        )
 
     if requirements_txt.exists():
         _ok("Found requirements.txt")
@@ -261,9 +275,13 @@ def main() -> None:
 
         extra = sorted(p for p in pkgs if p not in EXPECTED_SANDBOX_PACKAGES)
         if extra:
-            _warn(f"requirements.txt contains extra packages not in the curated sandbox list: {extra}")
+            _warn(
+                f"requirements.txt contains extra packages not in the curated sandbox list: {extra}"
+            )
     else:
-        _warn("requirements.txt not found; validator sandbox image only includes fastapi/uvicorn/httpx")
+        _warn(
+            "requirements.txt not found; validator sandbox image only includes fastapi/uvicorn/httpx"
+        )
 
     # Common footguns for public repos.
     _scan_for_secrets()
@@ -272,15 +290,21 @@ def main() -> None:
     _check_env_file()
 
     if (REPO_ROOT / "api.py").exists():
-        _warn("api.py exists. Subnet entrypoint is main:app; consider removing to avoid confusion.")
+        _warn(
+            "api.py exists. Subnet entrypoint is main:app; consider removing to avoid confusion."
+        )
 
     # Best-effort gateway checks.
     if llm_gateway_py.exists():
         gw_text = _read_text(llm_gateway_py)
         if "IWA-Task-ID" not in gw_text:
-            _warn("llm_gateway.py does not contain 'IWA-Task-ID'; gateway header injection may be missing")
+            _warn(
+                "llm_gateway.py does not contain 'IWA-Task-ID'; gateway header injection may be missing"
+            )
         if "OPENAI_BASE_URL" not in gw_text:
-            _warn("llm_gateway.py does not reference OPENAI_BASE_URL; agent may bypass the sandbox gateway")
+            _warn(
+                "llm_gateway.py does not reference OPENAI_BASE_URL; agent may bypass the sandbox gateway"
+            )
 
     # Compile key python files to catch syntax errors.
     for p in (main_py, agent_py, llm_gateway_py):

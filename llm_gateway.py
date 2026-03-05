@@ -46,11 +46,17 @@ def chat_completions(
     This utility is intentionally generic and can be copied into miner projects.
     It does not implement any planning/execution logic.
     """
-    resolved_base_url = (base_url or os.getenv(OPENAI_BASE_URL_ENV, "https://api.openai.com/v1")).rstrip("/")
-    resolved_api_key = api_key if api_key is not None else os.getenv("OPENAI_API_KEY", "")
+    resolved_base_url = (
+        base_url or os.getenv(OPENAI_BASE_URL_ENV, "https://api.openai.com/v1")
+    ).rstrip("/")
+    resolved_api_key = (
+        api_key if api_key is not None else os.getenv("OPENAI_API_KEY", "")
+    )
 
     if not resolved_api_key and not is_sandbox_gateway_base_url(resolved_base_url):
-        raise RuntimeError("OPENAI_API_KEY not set and OPENAI_BASE_URL is not a local sandbox gateway")
+        raise RuntimeError(
+            "OPENAI_API_KEY not set and OPENAI_BASE_URL is not a local sandbox gateway"
+        )
 
     headers = gateway_headers(task_id=task_id, api_key=resolved_api_key or None)
     url = f"{resolved_base_url}/chat/completions"
@@ -61,5 +67,7 @@ def chat_completions(
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
             snippet = (exc.response.text or "")[:300]
-            raise RuntimeError(f"chat/completions failed ({exc.response.status_code}): {snippet}") from exc
+            raise RuntimeError(
+                f"chat/completions failed ({exc.response.status_code}): {snippet}"
+            ) from exc
         return resp.json()

@@ -61,7 +61,9 @@ def _load_tasks(path: str | None, fallback_num_tasks: int) -> list[dict[str, Any
                 "url": str(item.get("url") or "https://example.com"),
                 "snapshot_html": str(item.get("snapshot_html") or "<html></html>"),
                 "step_index": int(item.get("step_index") or 0),
-                "history": item.get("history") if isinstance(item.get("history"), list) else [],
+                "history": item.get("history")
+                if isinstance(item.get("history"), list)
+                else [],
             }
         )
     return tasks
@@ -119,7 +121,9 @@ async def run_eval(
                     "ok": False,
                 }
                 try:
-                    call = await _call_act(session, base_url=agent_base_url, payload=task)
+                    call = await _call_act(
+                        session, base_url=agent_base_url, payload=task
+                    )
                     result["status"] = call["status"]
                     result["elapsed_ms"] = call["elapsed_ms"]
 
@@ -127,15 +131,25 @@ async def run_eval(
                     result["shape_ok"] = shape_ok
                     result["shape_msg"] = shape_msg
 
-                    actions = call["body"].get("actions") if isinstance(call["body"], dict) else []
-                    result["action_count"] = len(actions) if isinstance(actions, list) else 0
+                    actions = (
+                        call["body"].get("actions")
+                        if isinstance(call["body"], dict)
+                        else []
+                    )
+                    result["action_count"] = (
+                        len(actions) if isinstance(actions, list) else 0
+                    )
                     result["ok"] = (int(call["status"]) == 200) and bool(shape_ok)
                 except Exception as exc:
                     result["error"] = str(exc)
                 episodes.append(result)
 
     ok_count = sum(1 for ep in episodes if ep.get("ok"))
-    avg_latency = (sum(int(ep.get("elapsed_ms") or 0) for ep in episodes) / len(episodes)) if episodes else 0.0
+    avg_latency = (
+        (sum(int(ep.get("elapsed_ms") or 0) for ep in episodes) / len(episodes))
+        if episodes
+        else 0.0
+    )
 
     return {
         "agent_base_url": agent_base_url,
@@ -152,9 +166,15 @@ async def run_eval(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Generic /act evaluator for miner templates")
+    ap = argparse.ArgumentParser(
+        description="Generic /act evaluator for miner templates"
+    )
     ap.add_argument("--agent-base-url", default="http://127.0.0.1:5000")
-    ap.add_argument("--tasks-file", default=None, help="Optional JSON file: list[...] or {'tasks':[...]} ")
+    ap.add_argument(
+        "--tasks-file",
+        default=None,
+        help="Optional JSON file: list[...] or {'tasks':[...]} ",
+    )
     ap.add_argument("--num-tasks", type=int, default=5)
     ap.add_argument("--repeat", type=int, default=1)
     ap.add_argument("--timeout-seconds", type=float, default=30.0)

@@ -44,8 +44,16 @@ def _parse_run(raw: str) -> RunSpec:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Compare eval runs across provider:model configs")
-    ap.add_argument("--runs", nargs="+", action="append", required=True, help="provider:model entries")
+    ap = argparse.ArgumentParser(
+        description="Compare eval runs across provider:model configs"
+    )
+    ap.add_argument(
+        "--runs",
+        nargs="+",
+        action="append",
+        required=True,
+        help="provider:model entries",
+    )
     ap.add_argument("--agent-base-url", default="http://127.0.0.1:5000")
     ap.add_argument("--tasks-file", default=None)
     ap.add_argument("--num-tasks", type=int, default=5)

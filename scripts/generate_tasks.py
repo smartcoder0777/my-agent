@@ -27,7 +27,9 @@ def _load_operator_env(operator_dir: Path) -> None:
     try:
         from dotenv import load_dotenv
     except Exception as e:  # pragma: no cover
-        raise RuntimeError("python-dotenv is required to load .env for task generation") from e
+        raise RuntimeError(
+            "python-dotenv is required to load .env for task generation"
+        ) from e
 
     env_path = operator_dir / ".env"
     if env_path.exists():
@@ -60,7 +62,9 @@ async def _generate(project_id: str, prompts_per_use_case: int, dynamic: bool) -
 def main() -> None:
     operator_dir = Path(__file__).resolve().parents[1]
 
-    parser = argparse.ArgumentParser(description="Generate and cache tasks via autoppia_iwa.")
+    parser = argparse.ArgumentParser(
+        description="Generate and cache tasks via autoppia_iwa."
+    )
     parser.add_argument(
         "--project-id",
         action="append",
@@ -72,8 +76,15 @@ def main() -> None:
         default=None,
         help="Comma-separated project ids (alternative to repeating --project-id)",
     )
-    parser.add_argument("--prompts-per-use-case", type=int, default=1, help="Prompt variants per use case")
-    parser.add_argument("--dynamic", action="store_true", help="Enable dynamic task generation")
+    parser.add_argument(
+        "--prompts-per-use-case",
+        type=int,
+        default=1,
+        help="Prompt variants per use case",
+    )
+    parser.add_argument(
+        "--dynamic", action="store_true", help="Enable dynamic task generation"
+    )
     parser.add_argument(
         "--out",
         default=str(operator_dir / "data" / "task_cache" / "tasks_cache.json"),
@@ -83,7 +94,9 @@ def main() -> None:
 
     project_ids: list[str] = []
     if args.project_ids:
-        project_ids.extend([p.strip() for p in str(args.project_ids).split(',') if p.strip()])
+        project_ids.extend(
+            [p.strip() for p in str(args.project_ids).split(",") if p.strip()]
+        )
     project_ids.extend([p.strip() for p in (args.project_id or []) if p.strip()])
     if not project_ids:
         project_ids = ["autocinema"]
@@ -93,25 +106,31 @@ def main() -> None:
     k = os.getenv("OPENAI_API_KEY") or ""
     k_fpr = hashlib.sha256(k.encode("utf-8")).hexdigest()[:12] if k else "missing"
     if not k:
-        raise SystemExit("OPENAI_API_KEY missing in environment (check autoppia_operator/.env).")
+        raise SystemExit(
+            "OPENAI_API_KEY missing in environment (check autoppia_operator/.env)."
+        )
     print(f"OPENAI_API_KEY=set fpr={k_fpr}")
 
     async def _run() -> dict:
         all_tasks = []
         projects = []
         for pid in project_ids:
-            payload = await _generate(pid, int(args.prompts_per_use_case), bool(args.dynamic))
-            projects.append({
-                'project_id': payload.get('project_id'),
-                'project_name': payload.get('project_name'),
-                'num_tasks': len(payload.get('tasks') or []),
-            })
-            all_tasks.extend(payload.get('tasks') or [])
+            payload = await _generate(
+                pid, int(args.prompts_per_use_case), bool(args.dynamic)
+            )
+            projects.append(
+                {
+                    "project_id": payload.get("project_id"),
+                    "project_name": payload.get("project_name"),
+                    "num_tasks": len(payload.get("tasks") or []),
+                }
+            )
+            all_tasks.extend(payload.get("tasks") or [])
 
         return {
-            'timestamp': datetime.now().isoformat(),
-            'projects': projects,
-            'tasks': all_tasks,
+            "timestamp": datetime.now().isoformat(),
+            "projects": projects,
+            "tasks": all_tasks,
         }
 
     payload = asyncio.run(_run())
@@ -119,10 +138,14 @@ def main() -> None:
     out_path = Path(args.out).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
-    print(f"Wrote {len(payload['tasks'])} tasks from {len(payload['projects'])} projects -> {out_path}")
+    print(
+        f"Wrote {len(payload['tasks'])} tasks from {len(payload['projects'])} projects -> {out_path}"
+    )
 
     if not payload["tasks"]:
-        raise SystemExit("Generated 0 tasks (check OPENAI key/model access and generation logs).")
+        raise SystemExit(
+            "Generated 0 tasks (check OPENAI key/model access and generation logs)."
+        )
 
 
 if __name__ == "__main__":

@@ -1,13 +1,13 @@
+"""
+OpenAI-compatible LLM gateway with IWA-Task-ID header for sandbox cost tracking.
+"""
 from __future__ import annotations
 
-from typing import Any
-
 import os
+from typing import Any
 
 import httpx
 
-
-# Keep explicit names for validator/tooling checks.
 OPENAI_BASE_URL_ENV = "OPENAI_BASE_URL"
 IWA_TASK_ID_HEADER = "IWA-Task-ID"
 
@@ -41,17 +41,11 @@ def chat_completions(
     api_key: str | None = None,
     timeout_seconds: float = 30.0,
 ) -> dict[str, Any]:
-    """Call OpenAI-compatible `/chat/completions` through a gateway.
-
-    This utility is intentionally generic and can be copied into miner projects.
-    It does not implement any planning/execution logic.
-    """
+    """Call OpenAI-compatible /chat/completions through a gateway."""
     resolved_base_url = (
         base_url or os.getenv(OPENAI_BASE_URL_ENV, "https://api.openai.com/v1")
     ).rstrip("/")
-    resolved_api_key = (
-        api_key if api_key is not None else os.getenv("OPENAI_API_KEY", "")
-    )
+    resolved_api_key = api_key if api_key is not None else os.getenv("OPENAI_API_KEY", "")
 
     if not resolved_api_key and not is_sandbox_gateway_base_url(resolved_base_url):
         raise RuntimeError(

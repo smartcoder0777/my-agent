@@ -1,84 +1,45 @@
-# autoppia_web_agent_example (Template)
+# Subnet 36 Web Agent
 
-This repository is a **format template** for Autoppia web-agent miners.
+LLM-powered web agent for Bittensor Subnet 36. Exposes `GET /health` and `POST /act` as required by validators.
 
-It is intentionally **not** a real agent implementation.
-
-## Purpose
-
-Use this repo to understand the minimum API contract expected by the subnet validator:
-
-- `main.py` must export `app`
-- `GET /health` must return HTTP 200
-- `POST /act` must return JSON with top-level `actions` list
-
-## Current behavior
-
-`POST /act` always returns:
-
-```json
-{"actions": []}
-```
-
-This is by design. It demonstrates the response schema only.
-
-## Entry point
-
-Validator-compatible run command:
+## Quick Start
 
 ```bash
-uvicorn main:app --host 0.0.0.0 --port $SANDBOX_AGENT_PORT
-```
+# Install
+pip install -r requirements.txt
 
-## Example `/act` request shape
+# Configure (copy and add OPENAI_API_KEY)
+cp .env.example .env
 
-```json
-{
-  "task_id": "example-task-id",
-  "prompt": "Do something on the webpage",
-  "url": "https://example.com",
-  "snapshot_html": "<html>...</html>",
-  "step_index": 0,
-  "history": []
-}
-```
-
-## Included tools for miners
-
-These are generic and reusable helpers, not agent logic:
-
-- `llm_gateway.py`
-  - OpenAI-compatible gateway helper
-  - Adds required `IWA-Task-ID` header
-  - Reads `OPENAI_BASE_URL` so miners can route through sandbox gateway
-- `eval.py`
-  - Generic `/act` evaluator (shape + status + latency)
-  - Works with default synthetic tasks or a JSON tasks file
-- `compare_eval.py`
-  - Runs `eval.py` across multiple `provider:model` configs and aggregates results
-
-## Quick usage
-
-Run template server:
-
-```bash
+# Run
 uvicorn main:app --host 0.0.0.0 --port 5000
 ```
 
-Run generic eval:
+## API Contract
 
-```bash
-python eval.py --agent-base-url http://127.0.0.1:5000 --num-tasks 5
-```
+- **GET /health** - Returns `{"status": "healthy"}`
+- **POST /act** - Accepts task/HTML/history, returns `{"actions": [{"type": "...", ...}]}`
 
-Run compare tool:
+## Environment
 
-```bash
-python compare_eval.py --runs openai:gpt-5.2 openai:gpt-4o-mini --agent-base-url http://127.0.0.1:5000 --num-tasks 5
-```
+| Variable | Description |
+|----------|-------------|
+| `OPENAI_API_KEY` | Your OpenAI API key (or Chutes etc. via gateway) |
+| `OPENAI_BASE_URL` | Override API URL (sandbox sets this to gateway) |
+| `OPENAI_MODEL` | Model name (default: gpt-4o-mini) |
 
-## Notes for miners
+## Miner Setup
 
-- Start from this template and add your own logic incrementally.
-- Keep the response shape stable: `{ "actions": [...] }`.
-- Optionally implement `/step` as an alias for `/act`.
+1. Push this repo to GitHub
+2. In `autoppia_web_agents_subnet/.env` set:
+   ```
+   GITHUB_URL="https://github.com/yourusername/my_agent/commit/abc123..."
+   AGENT_NAME="My Agent"
+   ```
+3. Start the miner with PM2
+
+## Supported Actions
+
+- `navigate` - `{"type": "navigate", "url": "https://..."}`
+- `click` - `{"type": "click", "selector": "#submit-btn"}`
+- `input` - `{"type": "input", "selector": "#email", "value": "text"}`

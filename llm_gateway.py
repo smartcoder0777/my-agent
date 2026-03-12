@@ -65,3 +65,22 @@ def chat_completions(
                 f"chat/completions failed ({exc.response.status_code}): {snippet}"
             ) from exc
         return resp.json()
+
+
+def openai_chat_completions(
+    *,
+    task_id: str,
+    messages: list[dict[str, Any]],
+    model: str,
+    temperature: float = 0.2,
+    max_tokens: int = 350,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Convenience wrapper matching the reference agent's calling convention."""
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    return chat_completions(task_id=task_id, body=body, timeout_seconds=timeout_seconds)

@@ -1290,6 +1290,230 @@ def _run_tool(tool: str, args: Dict[str, Any], *, html: str, url: str, candidate
     return {"ok": False, "error": f"tool not wired: {t}"}
 
 
+# ---------------------------------------------------------------------------
+# Credential extraction & task classification (IWA-specific helpers)
+# ---------------------------------------------------------------------------
+
+def _extract_credentials_from_task(task: str) -> Dict[str, str]:
+    """Parse credential values literally embedded in the task prompt.
+
+    IWA replaces <USERNAME>/<PASSWORD> placeholders in the task *before* sending
+    to the agent, so the prompt contains real values like:
+      'Login where username equals john123 and password equals p@ss!'
+    We extract them so the LLM sees them in a structured block.
+    """
+    creds: Dict[str, str] = {}
+    t = task or ""
+
+    patterns = [
+        # "username equals X" / "username: X" (up to next comma, 'and', 'or', end)
+        (r"(?:user[- _]?name|user)\s*(?:equals|:|is|=)\s*['\"]?([^\s,'\"\n]+)['\"]?", "username"),
+        (r"(?:email)\s*(?:equals|:|is|=)\s*['\"]?([^\s,'\"\n]+)['\"]?", "email"),
+        (r"(?:password|pass)\s*(?:equals|:|is|=)\s*['\"]?([^\s,'\"\n]+)['\"]?", "password"),
+        # signup variants
+        (r"signup[_-]?username\s*(?:equals|:|is|=)\s*['\"]?([^\s,'\"\n]+)['\"]?", "signup_username"),
+        (r"signup[_-]?email\s*(?:equals|:|is|=)\s*['\"]?([^\s,'\"\n]+)['\"]?", "signup_email"),
+        (r"signup[_-]?password\s*(?:equals|:|is|=)\s*['\"]?([^\s,'\"\n]+)['\"]?", "signup_password"),
+    ]
+
+    for pat, key in patterns:
+        m = re.search(pat, t, re.IGNORECASE)
+        if m:
+            val = m.group(1).strip().rstrip(".,;:")
+            if val and val not in creds.values():
+                creds[key] = val
+
+    return creds
+
+
+def _classify_task(task: str) -> str:
+    """Return a short label for the task type to prime the LLM."""
+    t = (task or "").lower()
+
+    # Multi-step tasks first (order matters)
+    if re.search(r"\b(logout|sign.?out|log.?out)\b", t) and re.search(r"\b(login|sign.?in|log.?in)\b", t):
+        return "LOGIN_THEN_LOGOUT"
+    if re.search(r"\b(add|remove|delete).*(watchlist|reading.?list|wishlist|cart)\b", t) and re.search(r"\b(login|sign.?in)\b", t):
+        return "LOGIN_THEN_LIST_ACTION"
+    if re.search(r"\b(add|post|submit).*(comment|review|rating)\b", t) and re.search(r"\b(login|sign.?in)\b", t):
+        return "LOGIN_THEN_COMMENT"
+    if re.search(r"\b(add|insert|create|register).*(film|movie|book)\b", t) and re.search(r"\b(login|sign.?in)\b", t):
+        return "LOGIN_THEN_ADD_ITEM"
+    if re.search(r"\b(edit|update|modify).*(film|movie|book)\b", t) and re.search(r"\b(login|sign.?in)\b", t):
+        return "LOGIN_THEN_EDIT_ITEM"
+    if re.search(r"\b(delete|remove).*(film|movie|book)\b", t) and re.search(r"\b(login|sign.?in)\b", t):
+        return "LOGIN_THEN_DELETE_ITEM"
+    if re.search(r"\b(edit|update|modify).*(profile|account|user)\b", t) and re.search(r"\b(login|sign.?in)\b", t):
+        return "LOGIN_THEN_EDIT_PROFILE"
+    if re.search(r"\b(purchase|buy|checkout|order)\b", t) and re.search(r"\b(login|sign.?in)\b", t):
+        return "LOGIN_THEN_PURCHASE"
+
+    # Single-step tasks
+    if re.search(r"\b(register|sign.?up|create.*account|fill.*registration)\b", t):
+        return "REGISTRATION"
+    if re.search(r"\b(login|sign.?in|log.?in|fill.*login)\b", t):
+        return "LOGIN"
+    if re.search(r"\b(search|look.?for|find|look.?up)\b", t) and re.search(r"\b(film|movie|book)\b", t):
+        return "SEARCH_ITEM"
+    if re.search(r"\b(filter|sort)\b", t) and re.search(r"\b(film|movie|book)\b", t):
+        return "FILTER_ITEM"
+    if re.search(r"\b(navigate|go.?to|view.?detail|detail.?page|film.?page|book.?page|movie.?page)\b", t):
+        return "NAVIGATE_DETAIL"
+    if re.search(r"\b(share)\b", t) and re.search(r"\b(film|movie|book)\b", t):
+        return "SHARE_ITEM"
+    if re.search(r"\b(watch.*trailer|play.*trailer|trailer)\b", t):
+        return "WATCH_TRAILER"
+    if re.search(r"\b(preview|open.*preview)\b", t):
+        return "OPEN_PREVIEW"
+    if re.search(r"\b(add|put).*(cart|basket)\b", t):
+        return "ADD_TO_CART"
+    if re.search(r"\b(remove|delete).*(cart|basket)\b", t):
+        return "REMOVE_FROM_CART"
+    if re.search(r"\b(view|show).*(cart|basket)\b", t):
+        return "VIEW_CART"
+    if re.search(r"\b(purchase|buy|checkout|order)\b", t):
+        return "PURCHASE"
+    if re.search(r"\b(contact|send.*message|fill.*contact)\b", t):
+        return "CONTACT"
+    if re.search(r"\b(add|post|submit).*(comment|review)\b", t):
+        return "ADD_COMMENT"
+    if re.search(r"\b(watchlist|reading.?list|wishlist)\b", t):
+        return "LIST_ACTION"
+
+    return "GENERAL"
+
+
+_TASK_PLAYBOOKS: Dict[str, str] = {
+    "REGISTRATION": (
+        "PLAYBOOK: 1) Navigate to register/signup page. "
+        "2) Type signup_username (or username) into the username field. "
+        "3) Type signup_email (or email) into the email field. "
+        "4) Type signup_password (or password) into the password field. "
+        "5) Click submit/register button. "
+        "Use EXACT credential values from TASK_CREDENTIALS or task text."
+    ),
+    "LOGIN": (
+        "PLAYBOOK: 1) Navigate to login page. "
+        "2) Type username into the username/email field EXACTLY as given. "
+        "3) Type password into the password field EXACTLY as given. "
+        "4) Click login/sign-in submit button."
+    ),
+    "LOGIN_THEN_LOGOUT": (
+        "PLAYBOOK: 1) Navigate to login page. "
+        "2) Type username exactly. 3) Type password exactly. 4) Click login submit. "
+        "5) After login, find logout/sign-out button (often in nav/profile menu). "
+        "6) Click logout."
+    ),
+    "LOGIN_THEN_LIST_ACTION": (
+        "PLAYBOOK: 1) Login (navigate to login, fill credentials, submit). "
+        "2) Search or browse to find the specific item matching the criteria. "
+        "3) Navigate to that item's detail page. "
+        "4) Click the add-to-watchlist/reading-list/cart button, or remove button."
+    ),
+    "LOGIN_THEN_COMMENT": (
+        "PLAYBOOK: 1) Login (navigate to login, fill credentials, submit). "
+        "2) Find and navigate to the specific item. "
+        "3) Find the comment/review form on the detail page. "
+        "4) Type the comment text. 5) Submit."
+    ),
+    "LOGIN_THEN_ADD_ITEM": (
+        "PLAYBOOK: 1) Login (navigate to login, fill credentials, submit). "
+        "2) Navigate to admin or add-item page (look for Admin/Add Film/Add Book in nav). "
+        "3) Fill ALL fields with EXACT values from task. "
+        "4) Submit."
+    ),
+    "LOGIN_THEN_EDIT_ITEM": (
+        "PLAYBOOK: 1) Login. "
+        "2) Navigate to item list page (admin or main list). "
+        "3) Find the specific item matching the search/filter criteria. "
+        "4) Click Edit. 5) Update the specified fields EXACTLY. 6) Submit."
+    ),
+    "LOGIN_THEN_DELETE_ITEM": (
+        "PLAYBOOK: 1) Login. "
+        "2) Navigate to item list. "
+        "3) Find the specific item. "
+        "4) Click Delete. 5) Confirm deletion if prompted."
+    ),
+    "LOGIN_THEN_EDIT_PROFILE": (
+        "PLAYBOOK: 1) Login. "
+        "2) Navigate to profile/account/settings page. "
+        "3) Update the specified fields EXACTLY. 4) Save."
+    ),
+    "LOGIN_THEN_PURCHASE": (
+        "PLAYBOOK: 1) Login. "
+        "2) Find the item and add to cart. "
+        "3) Navigate to cart/checkout. "
+        "4) Complete checkout form. 5) Submit order."
+    ),
+    "SEARCH_ITEM": (
+        "PLAYBOOK: 1) Find the search bar on the page. "
+        "2) Type the search query EXACTLY as given in the task. "
+        "3) Submit search (press Enter or click search button). "
+        "Do NOT modify the search query."
+    ),
+    "FILTER_ITEM": (
+        "PLAYBOOK: 1) Find filter controls on the page. "
+        "2) Select/type the filter criteria EXACTLY as specified. "
+        "3) Apply the filter."
+    ),
+    "NAVIGATE_DETAIL": (
+        "PLAYBOOK: 1) Browse or search for items. "
+        "2) Use list_cards or list_links tool to find item matching ALL criteria. "
+        "3) Click/navigate to that item's detail page. "
+        "If you need to filter by criteria, use search or filter controls first."
+    ),
+    "SHARE_ITEM": (
+        "PLAYBOOK: 1) Navigate to the specific item detail page. "
+        "2) Find the Share button/icon (often a share icon or 'Share' text). "
+        "3) Click it."
+    ),
+    "WATCH_TRAILER": (
+        "PLAYBOOK: 1) Navigate to the specific film/movie detail page. "
+        "2) Find the 'Watch Trailer' or 'Trailer' or play button. "
+        "3) Click it."
+    ),
+    "OPEN_PREVIEW": (
+        "PLAYBOOK: 1) Navigate to the specific book detail page. "
+        "2) Find the 'Open Preview' or 'Preview' button. "
+        "3) Click it."
+    ),
+    "ADD_TO_CART": (
+        "PLAYBOOK: 1) Find and navigate to the specific book/item. "
+        "2) Click 'Add to Cart' button."
+    ),
+    "REMOVE_FROM_CART": (
+        "PLAYBOOK: 1) Navigate to the cart page. "
+        "2) Find the specific item in cart. 3) Click Remove/Delete."
+    ),
+    "VIEW_CART": (
+        "PLAYBOOK: 1) Navigate to the cart page (look for Cart icon in nav)."
+    ),
+    "PURCHASE": (
+        "PLAYBOOK: 1) Add the item to cart. "
+        "2) Navigate to cart. 3) Click checkout/purchase button. "
+        "4) Fill out purchase form. 5) Submit."
+    ),
+    "CONTACT": (
+        "PLAYBOOK: 1) Navigate to the Contact page (look for Contact in nav). "
+        "2) Fill in name, email, message fields with EXACT values from task. "
+        "3) Submit the form."
+    ),
+    "ADD_COMMENT": (
+        "PLAYBOOK: 1) Navigate to the specific item detail page. "
+        "2) Find the comment/review form. "
+        "3) Type the comment EXACTLY as specified. 4) Submit."
+    ),
+    "LIST_ACTION": (
+        "PLAYBOOK: 1) Navigate to the item detail page. "
+        "2) Find the watchlist/reading-list button. 3) Click add or remove."
+    ),
+    "GENERAL": (
+        "PLAYBOOK: Analyze the task carefully, identify the key action required, "
+        "and execute the most direct path to complete it."
+    ),
+}
+
+
 def _llm_decide(
     *,
     task_id: str,
@@ -1307,29 +1531,53 @@ def _llm_decide(
     relevant_data: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     browser_state = _format_browser_state(candidates=candidates, prev_sig_set=prev_sig_set)
+
+    task_type = _classify_task(task)
+    playbook = _TASK_PLAYBOOKS.get(task_type, _TASK_PLAYBOOKS["GENERAL"])
+
+    # Extract credentials from both task text and relevant_data
+    creds_from_task = _extract_credentials_from_task(task)
+    creds_from_data: Dict[str, str] = {}
+    if relevant_data and isinstance(relevant_data, dict):
+        for k, v in relevant_data.items():
+            if isinstance(v, str) and v:
+                creds_from_data[str(k)] = str(v)
+    all_creds = {**creds_from_task, **creds_from_data}
+
     system_msg = (
-        "You are a web automation agent. Given the task, step number, state, history, and state diff, choose ONE next action. "
-        "Return JSON only (no markdown). "
-        "Do NOT provide detailed chain-of-thought. "
-        "Return a JSON object with keys: action, candidate_id, text, url, evaluation_previous_goal, memory, next_goal. "
-        "Preserve the current URL query parameters (e.g., seed) unless the task requires changing them. "
-        "action must be one of: click,type,select,navigate,scroll_down,scroll_up,done. "
-        "Constraints: for click/type/select, candidate_id must be an integer index into the BROWSER_STATE list (the number inside [..]). "
-        "For type/select, text must be non-empty. Avoid done unless the task is clearly completed. "
-        "CREDENTIALS: When RELEVANT_DATA provides username/password/email/credentials, use those EXACT values in TypeAction text. "
-        "If credentials are not in RELEVANT_DATA but the task requires login, use placeholder text <USERNAME> or <PASSWORD> which IWA replaces. "
-        "TASK PATTERNS: For login tasks -> navigate to login page, type credentials, click submit. "
-        "For registration -> navigate to register page, fill all required fields, submit. "
-        "For search/filter -> find search input, type query, submit. "
-        "For purchase/booking -> navigate to item, add to cart, checkout. "
-        "For contact/message -> find contact form, fill fields, submit. "
-        "If the task requires choosing a specific item that matches multiple attributes, first inspect the page using list_cards or list_links, then click/navigate to the matching item. "
-        "You may optionally request an HTML inspection tool instead of an action by returning JSON with keys: tool, args. "
-        "Available tools: search_text(args: {query, regex?, case_sensitive?, max_matches?, context_chars?}); "
-        "visible_text(args: {max_chars?}); css_select(args: {selector, max_nodes?}); xpath_select(args: {xpath, max_nodes?}); "
-        "extract_forms(args: {max_forms?, max_inputs?}); list_links(args: {max_links?, context_max?, href_regex?, text_regex?}); "
-        "list_candidates(args: {max_n?}); list_cards(args: {max_cards?, max_text?, max_actions_per_card?}). "
-        "After a tool result is returned, pick the next action. Prefer at most 2 tool calls per step."
+        "You are a web automation agent. You will be given a task, the current browser state, and history. "
+        "Return JSON only (no markdown, no explanation). "
+        "Return a JSON object with EXACTLY these keys: action, candidate_id, text, url, evaluation_previous_goal, memory, next_goal. "
+        "\n"
+        "ACTION RULES:\n"
+        "- action must be one of: click, type, select, navigate, scroll_down, scroll_up, done\n"
+        "- For click/type/select: candidate_id must be an integer (index from BROWSER_STATE list)\n"
+        "- For type/select: text must be non-empty\n"
+        "- For navigate: url must be a full URL. Preserve existing query params (e.g., ?seed=X)\n"
+        "- Use done ONLY when the task is clearly and fully completed\n"
+        "\n"
+        "STRICT VALUE COPYING (CRITICAL):\n"
+        "- Copy ALL values EXACTLY as provided in TASK_CREDENTIALS or the task text\n"
+        "- Do NOT correct typos, do NOT remove numbers, do NOT truncate strings\n"
+        "- Example: if task says 'Sofia 4', type 'Sofia 4' not 'Sofia'\n"
+        "- Example: if task says 'ng', type 'ng' not 'anything'\n"
+        "\n"
+        "CREDENTIAL HANDLING:\n"
+        "- If TASK_CREDENTIALS is shown, use those exact values when typing into username/email/password fields\n"
+        "- Map 'username'/'signup_username' → username input field\n"
+        "- Map 'email'/'signup_email' → email input field\n"
+        "- Map 'password'/'signup_password' → password input field\n"
+        "\n"
+        "MULTI-STEP TASKS:\n"
+        "- For tasks requiring login THEN another action: first complete the full login, then do the secondary action\n"
+        "- Track progress in memory: store what you've done and what remains\n"
+        "\n"
+        "HTML INSPECTION TOOLS (use when needed to find items):\n"
+        "Return {\"tool\": \"<name>\", \"args\": {...}} instead of an action. Max 2 tool calls per step.\n"
+        "Tools: search_text({query,regex?,case_sensitive?,max_matches?,context_chars?}); "
+        "visible_text({max_chars?}); css_select({selector,max_nodes?}); xpath_select({xpath,max_nodes?}); "
+        "extract_forms({max_forms?,max_inputs?}); list_links({max_links?,context_max?,href_regex?,text_regex?}); "
+        "list_candidates({max_n?}); list_cards({max_cards?,max_text?,max_actions_per_card?})."
     )
 
     history_lines: List[str] = []
@@ -1368,19 +1616,19 @@ def _llm_decide(
     except Exception:
         agent_mem = ""
 
-    relevant_data_str = ""
-    if relevant_data and isinstance(relevant_data, dict) and relevant_data:
-        try:
-            relevant_data_str = json.dumps(relevant_data, ensure_ascii=True)
-        except Exception:
-            relevant_data_str = str(relevant_data)[:400]
+    creds_block = ""
+    if all_creds:
+        creds_block = "TASK_CREDENTIALS (use EXACTLY as-is, no modifications):\n"
+        for k, v in all_creds.items():
+            creds_block += f"  {k}: {v}\n"
 
     user_msg = (
-        f"You have a task and must decide the next single browser action.\n"
         f"TASK: {task}\n"
+        f"TASK_TYPE: {task_type}\n"
         f"STEP: {int(step_index)}\n"
         f"URL: {url}\n\n"
-        + (f"RELEVANT_DATA (use these exact values for form fields/credentials): {relevant_data_str}\n\n" if relevant_data_str else "")
+        + (creds_block + "\n" if creds_block else "")
+        + f"{playbook}\n\n"
         + f"CURRENT STATE (TEXT SUMMARY):\n{page_summary}\n\n"
         + (f"DOM DIGEST (STRUCTURED):\n{dom_digest}\n\n" if dom_digest else "")
         + (f"CARDS (GROUPED CLICKABLE CONTEXTS JSON):\n{cards_preview}\n\n" if cards_preview else "")
@@ -1390,16 +1638,8 @@ def _llm_decide(
         + (f"AGENT MEMORY:\n{agent_mem}\n" if agent_mem else "")
         + (f"STATE DELTA (prev -> current): {state_delta}\n\n" if state_delta else "")
         + "BROWSER_STATE (interactive elements):\n" + browser_state + "\n\n"
-        + "Instructions:\n"
-        + "- Output JSON only.\n"
-        + "- Return ONE action for this step (no multi-step sequences).\n"
-        + "- If you need to do a multi-step procedure (login/register/contact), pick the best next step only.\n"
-        + "- Use candidate_id for click/type/select and ensure it is in-range.\n"
-        + "- Use navigate with a full URL when you need to change pages (prefer preserving existing query params like seed).\n"
-        + "- For type/select, include non-empty text.\n"
-        + "- Provide evaluation_previous_goal, memory, next_goal (each 1 sentence). Do NOT provide detailed chain-of-thought.\n"
-        + "- If RELEVANT_DATA is provided, use those exact values when filling in form fields.\n"
-        + "- If credentials are needed but not in RELEVANT_DATA, type <USERNAME> or <PASSWORD> as text (IWA replaces them).\n"
+        + "Return ONE JSON action for this step only. "
+        + "Provide evaluation_previous_goal, memory, next_goal (1 sentence each)."
     )
 
     model = os.getenv("OPENAI_MODEL", "gpt-4o")

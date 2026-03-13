@@ -1304,6 +1304,7 @@ def _llm_decide(
     extra_hint: str = "",
     state_delta: str = "",
     prev_sig_set: set[str] | None = None,
+    relevant_data: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     browser_state = _format_browser_state(candidates=candidates, prev_sig_set=prev_sig_set)
     system_msg = (
@@ -1315,6 +1316,13 @@ def _llm_decide(
         "action must be one of: click,type,select,navigate,scroll_down,scroll_up,done. "
         "Constraints: for click/type/select, candidate_id must be an integer index into the BROWSER_STATE list (the number inside [..]). "
         "For type/select, text must be non-empty. Avoid done unless the task is clearly completed. "
+        "CREDENTIALS: When RELEVANT_DATA provides username/password/email/credentials, use those EXACT values in TypeAction text. "
+        "If credentials are not in RELEVANT_DATA but the task requires login, use placeholder text <USERNAME> or <PASSWORD> which IWA replaces. "
+        "TASK PATTERNS: For login tasks -> navigate to login page, type credentials, click submit. "
+        "For registration -> navigate to register page, fill all required fields, submit. "
+        "For search/filter -> find search input, type query, submit. "
+        "For purchase/booking -> navigate to item, add to cart, checkout. "
+        "For contact/message -> find contact form, fill fields, submit. "
         "If the task requires choosing a specific item that matches multiple attributes, first inspect the page using list_cards or list_links, then click/navigate to the matching item. "
         "You may optionally request an HTML inspection tool instead of an action by returning JSON with keys: tool, args. "
         "Available tools: search_text(args: {query, regex?, case_sensitive?, max_matches?, context_chars?}); "
@@ -1360,12 +1368,20 @@ def _llm_decide(
     except Exception:
         agent_mem = ""
 
+    relevant_data_str = ""
+    if relevant_data and isinstance(relevant_data, dict) and relevant_data:
+        try:
+            relevant_data_str = json.dumps(relevant_data, ensure_ascii=True)
+        except Exception:
+            relevant_data_str = str(relevant_data)[:400]
+
     user_msg = (
         f"You have a task and must decide the next single browser action.\n"
         f"TASK: {task}\n"
         f"STEP: {int(step_index)}\n"
         f"URL: {url}\n\n"
-        f"CURRENT STATE (TEXT SUMMARY):\n{page_summary}\n\n"
+        + (f"RELEVANT_DATA (use these exact values for form fields/credentials): {relevant_data_str}\n\n" if relevant_data_str else "")
+        + f"CURRENT STATE (TEXT SUMMARY):\n{page_summary}\n\n"
         + (f"DOM DIGEST (STRUCTURED):\n{dom_digest}\n\n" if dom_digest else "")
         + (f"CARDS (GROUPED CLICKABLE CONTEXTS JSON):\n{cards_preview}\n\n" if cards_preview else "")
         + f"STRUCTURED STATE (JSON):\n{json.dumps(structured, ensure_ascii=True)}\n\n"
@@ -1382,12 +1398,13 @@ def _llm_decide(
         + "- Use navigate with a full URL when you need to change pages (prefer preserving existing query params like seed).\n"
         + "- For type/select, include non-empty text.\n"
         + "- Provide evaluation_previous_goal, memory, next_goal (each 1 sentence). Do NOT provide detailed chain-of-thought.\n"
-        + "- If CREDENTIALS are provided, use those exact values when typing.\n"
+        + "- If RELEVANT_DATA is provided, use those exact values when filling in form fields.\n"
+        + "- If credentials are needed but not in RELEVANT_DATA, type <USERNAME> or <PASSWORD> as text (IWA replaces them).\n"
     )
 
     model = os.getenv("OPENAI_MODEL", "gpt-4o")
     temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.2"))
-    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "350"))
+    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "500"))
 
     usages: List[Dict[str, Any]] = []
     tool_calls = 0
@@ -1599,6 +1616,7 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     return_metrics = os.getenv("AGENT_RETURN_METRICS", "0").lower() in {"1", "true", "yes"}
     html = payload.get("snapshot_html") or ""
     history = payload.get("history") if isinstance(payload.get("history"), list) else None
+    relevant_data = payload.get("relevant_data") if isinstance(payload.get("relevant_data"), dict) else None
     page_summary = _summarize_html(html)
     dom_digest = _dom_digest(html)
     task = str(task or "")
@@ -1660,6 +1678,7 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
             extra_hint=extra_hint,
             state_delta=state_delta,
             prev_sig_set=prev_sig_set,
+            relevant_data=relevant_data,
         )
         if os.getenv("AGENT_LOG_DECISIONS", "0").lower() in {"1", "true", "yes"}:
             try:

@@ -1724,6 +1724,8 @@ def _classify_task(task: str) -> str:
         return "VIEW_HIDDEN_POSTS"
     if re.search(r"search\s+for\s+jobs\s+where\s+the\s+query", t, re.IGNORECASE):
         return "SEARCH_JOBS"
+    if re.search(r"apply\s+for\s+(a\s+)?job", t, re.IGNORECASE):
+        return "APPLY_FOR_JOB"
     if re.search(r"edit\s+profile\s+to\s+set\s+the\s+bio", t, re.IGNORECASE):
         return "EDIT_PROFILE_BIO"
 
@@ -2921,6 +2923,13 @@ _TASK_PLAYBOOKS: Dict[str, str] = {
         "3) Type a search query that does NOT contain the excluded term (from NOT CONTAIN constraint). "
         "4) Submit the search."
     ),
+    "APPLY_FOR_JOB": (
+        "PLAYBOOK: 1) On AutoConnect (jobs site), browse the job listings. "
+        "2) Find a job matching ALL TASK_CONSTRAINTS: "
+        "   - job_title NOT CONTAIN excluded term, company NOT CONTAIN excluded term, etc. "
+        "3) Click on that job listing to open its detail page. "
+        "4) Find and click the 'Apply' button to apply for the job."
+    ),
     # ---- AutoMail (8005) ----
     "MARK_AS_SPAM": (
         "PLAYBOOK: 1) On AutoMail, browse the inbox/email list. "
@@ -3641,7 +3650,7 @@ def _llm_decide(
     )
 
     history_lines: List[str] = []
-    for h in (history or [])[-3:]:
+    for h in (history or [])[-2:]:
         step = h.get("step", "?")
         action = h.get("action", "")
         cid = h.get("candidate_id")
@@ -3657,13 +3666,13 @@ def _llm_decide(
 
     # Only include cards on early steps to save tokens
     cards_preview = ""
-    if int(step_index) <= 3:
+    if int(step_index) <= 2:
         try:
-            cards_obj = _tool_list_cards(candidates=candidates, max_cards=8, max_text=200, max_actions_per_card=2)
+            cards_obj = _tool_list_cards(candidates=candidates, max_cards=6, max_text=120, max_actions_per_card=1)
             if isinstance(cards_obj, dict) and cards_obj.get("ok") and cards_obj.get("cards"):
                 cards_preview = json.dumps(cards_obj.get("cards"), ensure_ascii=True)
-                if len(cards_preview) > 900:
-                    cards_preview = cards_preview[:897] + "..."
+                if len(cards_preview) > 600:
+                    cards_preview = cards_preview[:597] + "..."
         except Exception:
             cards_preview = ""
 
@@ -3686,14 +3695,14 @@ def _llm_decide(
             creds_block += f"  {k}: '{v}'\n"
 
     # Cap large sections to control per-step token costs
-    page_summary_capped = page_summary[:700] if page_summary else ""
+    page_summary_capped = page_summary[:400] if page_summary else ""
     # DOM digest only on step 0 (first look)
-    dom_digest_capped = dom_digest[:300] if dom_digest and int(step_index) <= 1 else ""
+    dom_digest_capped = dom_digest[:200] if dom_digest and int(step_index) == 0 else ""
     structured_str = json.dumps(structured, ensure_ascii=True)
-    if len(structured_str) > 900:
-        structured_str = structured_str[:897] + "..."
-    website_ctx_short = (website_ctx[:250] + "...") if len(website_ctx) > 250 else website_ctx
-    playbook_capped = (playbook[:400] + "...") if len(playbook) > 400 else playbook
+    if len(structured_str) > 500:
+        structured_str = structured_str[:497] + "..."
+    website_ctx_short = (website_ctx[:150] + "...") if len(website_ctx) > 150 else website_ctx
+    playbook_capped = (playbook[:350] + "...") if len(playbook) > 350 else playbook
 
     user_msg = (
         f"TASK: {task}\n"
@@ -3714,9 +3723,9 @@ def _llm_decide(
         + "ONE JSON action only."
     )
 
-    model = os.getenv("OPENAI_MODEL", "gpt-4o")
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.2"))
-    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "350"))
+    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "250"))
 
     usages: List[Dict[str, Any]] = []
     tool_calls = 0
@@ -3926,6 +3935,12 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     url = payload.get("url") or ""
     step_index = int(payload.get("step_index") or 0)
     return_metrics = os.getenv("AGENT_RETURN_METRICS", "0").lower() in {"1", "true", "yes"}
+
+    # Hard step cap: force done after 7 steps to avoid over-cost
+    max_steps_hard = int(os.getenv("AGENT_MAX_STEPS", "7"))
+    if step_index >= max_steps_hard:
+        return _resp([{"type": "DoneAction", "success": True}], {"decision": "forced_done_step_cap", "step_index": step_index})
+
     html = payload.get("snapshot_html") or ""
     history = payload.get("history") if isinstance(payload.get("history"), list) else None
     relevant_data = payload.get("relevant_data") if isinstance(payload.get("relevant_data"), dict) else None

@@ -1919,6 +1919,12 @@ def _classify_task(task: str) -> str:
         return "LOGIN_BOOK"
     if re.search(r"authenticate\s+with\s+username.*view\s+the\s+shopping\s+cart", t, re.IGNORECASE):
         return "VIEW_CART_BOOK"
+    if re.search(r"(add|create)\s+a\s+book\s+(with|where)\s+genres?", t, re.IGNORECASE):
+        return "ADD_BOOK"
+    if re.search(r"leave\s+a\s+comment\s+on\s+a\s+book", t, re.IGNORECASE):
+        return "ADD_COMMENT_BOOK"
+    if re.search(r"open\s+preview\s+of\s+a\s+book", t, re.IGNORECASE):
+        return "OPEN_PREVIEW"
 
     # ---- AutoCinema (8000) specific ----
     if re.search(r"add\s+(to\s+)?watchlist", t, re.IGNORECASE):
@@ -1929,6 +1935,10 @@ def _classify_task(task: str) -> str:
         return "SHARE_MOVIE"
     if re.search(r"watch\s+the\s+trailer\s+for\s+a\s+movie", t, re.IGNORECASE):
         return "WATCH_TRAILER"
+    if re.search(r"(navigate\s+to\s+(a\s+)?movie\s+page|show\s+details?\s+for\s+(a\s+)?movie)\s+where", t, re.IGNORECASE):
+        return "FILM_DETAIL"
+    if re.search(r"search\s+for\s+(a\s+)?movie\s+where\s+the\s+query", t, re.IGNORECASE):
+        return "SEARCH_FILM"
 
     # ---- AutoShop (8002) additional ----
     if re.search(r"click\s+on\s+buy\s+now\s+to\s+initiate\s+checkout", t, re.IGNORECASE):
@@ -1939,10 +1949,14 @@ def _classify_task(task: str) -> str:
         return "ABOUT_PAGE_VIEW"
     if re.search(r"open\s+the\s+date\s+selector", t, re.IGNORECASE):
         return "DATE_DROPDOWN_OPENED"
+    if re.search(r"(open|show\s+details\s+for\s+opening)\s+the\s+time\s+(selection\s+)?dropdown", t, re.IGNORECASE):
+        return "TIME_DROPDOWN_OPENED"
     if re.search(r"(retrieve\s+details\s+of\s+a\s+contact\s+form|submit.*contact.*form.*email.*contains)", t, re.IGNORECASE):
         return "CONTACT_FORM_SUBMIT"
 
     # ---- AutoDoc (8004) additional ----
+    if re.search(r"(retrieve|show)\s+details\s+of\s+billing\s+(entries|records)|billing\s+entries\s+where", t, re.IGNORECASE):
+        return "BILLING_SEARCH"
     if re.search(r"edit\s+log\s+entry\s+where", t, re.IGNORECASE):
         return "LOG_EDITED"
     if re.search(r"archive\s+the\s+matter\s+where", t, re.IGNORECASE):
@@ -1953,12 +1967,16 @@ def _classify_task(task: str) -> str:
         return "VIEW_MATTER_DETAILS"
 
     # ---- AutoMail (8005) additional ----
+    if re.search(r"add\s+a\s+label\s+to\s+the\s+email\s+where", t, re.IGNORECASE):
+        return "ADD_LABEL"
     if re.search(r"send\s+an\s+email\s+to\s+['\"]", t, re.IGNORECASE):
         return "SEND_EMAIL"
     if re.search(r"search\s+for\s+emails?\s+where\s+the\s+query", t, re.IGNORECASE):
         return "SEARCH_EMAIL"
 
     # ---- AutoDelivery (8006) additional ----
+    if re.search(r"delete\s+the\s+review\s+for\s+the\s+restaurant", t, re.IGNORECASE):
+        return "DELETE_REVIEW"
     if re.search(r"show\s+me\s+restaurants?\s+that\s+do\s+NOT", t, re.IGNORECASE):
         return "RESTAURANT_FILTER"
     if re.search(r"add\s+a?\s*menu\s+item\s+to\s+(my\s+)?cart", t, re.IGNORECASE):
@@ -1969,6 +1987,8 @@ def _classify_task(task: str) -> str:
         return "QUICK_ORDER_STARTED"
 
     # ---- AutoLodge (8007) additional ----
+    if re.search(r"open\s+the\s+FAQ\s+item\s+where", t, re.IGNORECASE):
+        return "FAQ_OPENED"
     if re.search(r"message\s+the\s+host\s+where", t, re.IGNORECASE):
         return "MESSAGE_HOST"
     if re.search(r"edit\s+check.?in.*check.?out\s+dates", t, re.IGNORECASE):
@@ -1977,12 +1997,18 @@ def _classify_task(task: str) -> str:
         return "WISHLIST_OPENED"
 
     # ---- AutoConnect (8008) additional ----
+    if re.search(r"open\s+the\s+jobs?\s+tab\s+from\s+the\s+navbar", t, re.IGNORECASE):
+        return "JOBS_NAVBAR"
     if re.search(r"edit\s+profile\s+information", t, re.IGNORECASE):
         return "EDIT_PROFILE"
     if re.search(r"post\s+a\s+status\s+update", t, re.IGNORECASE):
         return "POST_STATUS"
 
     # ---- AutoHire (8009) additional ----
+    if re.search(r"edit\s+profile\s+title\s+where", t, re.IGNORECASE):
+        return "EDIT_PROFILE_TITLE"
+    if re.search(r"(user\s+clicks?|click)\s+'?post\s+a\s+job'?|initiate.*posting.*job|clicks?\s+'?post\s+a\s+job'?\s+button", t, re.IGNORECASE):
+        return "POST_A_JOB"
     if re.search(r"clicks?\s+the\s+'?experts?'?\s+option\s+in\s+the\s+navbar|list\s+of\s+all\s+experts.*clicks?\s+the\s+'?experts?", t, re.IGNORECASE):
         return "NAVBAR_EXPERTS_CLICK"
     if re.search(r"show\s+the\s+list\s+of\s+all\s+experts", t, re.IGNORECASE):
@@ -2180,10 +2206,33 @@ _TASK_PLAYBOOKS: Dict[str, str] = {
         "2) Find the 'Watch Trailer' or 'Trailer' or play button. "
         "3) Click it."
     ),
+    "FILM_DETAIL": (
+        "PLAYBOOK: 1) On AutoCinema, browse the movie list. "
+        "2) Find a movie matching ALL TASK_CONSTRAINTS (genres NOT CONTAIN, duration GREATER EQUAL, etc.). "
+        "3) Click on that movie to open its detail page."
+    ),
+    "SEARCH_FILM": (
+        "PLAYBOOK: 1) On AutoCinema, find the search bar. "
+        "2) Type a movie title that is NOT the excluded term from the NOT constraint. "
+        "3) Submit the search."
+    ),
     "OPEN_PREVIEW": (
         "PLAYBOOK: 1) Navigate to the specific book detail page. "
         "2) Find the 'Open Preview' or 'Preview' button. "
         "3) Click it."
+    ),
+    "ADD_BOOK": (
+        "PLAYBOOK: 1) On AutoBooks, login first if credentials provided. "
+        "2) Find the 'Add Book' or 'Create Book' button/link. "
+        "3) Fill in the book form: genres equals the specified genre, year equals the specified year. "
+        "4) Submit the form."
+    ),
+    "ADD_COMMENT_BOOK": (
+        "PLAYBOOK: 1) On AutoBooks, find the book whose name CONTAINS the specified title. "
+        "2) Open that book's detail page. "
+        "3) Find the comments section and click 'Add comment' or 'Leave a review'. "
+        "4) Fill in: commenter name EQUALS the specified name, message does NOT CONTAIN the excluded text. "
+        "5) Submit the comment."
     ),
     "ADD_TO_CART": (
         "PLAYBOOK: 1) Find and navigate to the specific book/item. "
@@ -2266,6 +2315,13 @@ _TASK_PLAYBOOKS: Dict[str, str] = {
     "DELETE_EMAIL": (
         "PLAYBOOK: 1) Find the email matching subject/from_email constraints. "
         "2) Click the Delete/Trash icon on that email row."
+    ),
+    "ADD_LABEL": (
+        "PLAYBOOK: 1) On AutoMail, find the email matching ALL TASK_CONSTRAINTS: "
+        "   subject CONTAINS the required substring, body CONTAINS required text. "
+        "2) Open that email or select it. "
+        "3) Find the 'Label' or 'Add Label' option (in toolbar or right-click menu). "
+        "4) Select a label that is NOT the excluded label_name."
     ),
     "FORWARD_EMAIL": (
         "PLAYBOOK: 1) Find the email matching subject/body constraints. "
@@ -3212,6 +3268,12 @@ _TASK_PLAYBOOKS: Dict[str, str] = {
         "3) Select a date satisfying the constraint (less_equal given date). "
         "4) Confirm selection."
     ),
+    "TIME_DROPDOWN_OPENED": (
+        "PLAYBOOK: 1) On AutoRestaurant, find the time selection dropdown. "
+        "2) Click to open the time dropdown. "
+        "3) Select the time that equals the specified value (e.g. '1:00 PM'). "
+        "4) Confirm selection."
+    ),
     "CONTACT_FORM_SUBMIT": (
         "PLAYBOOK: 1) On AutoRestaurant, navigate to the Contact page. "
         "2) Fill in: email CONTAINS 'olivia.brown@' (or exact), username NOT CONTAINS 'Olivia'. "
@@ -3219,6 +3281,13 @@ _TASK_PLAYBOOKS: Dict[str, str] = {
         "4) Submit the contact form."
     ),
     # ---- AutoDoc (8004) additional ----
+    "BILLING_SEARCH": (
+        "PLAYBOOK: 1) On AutoDoc, navigate to the Billing section. "
+        "2) Find the search/filter inputs for billing entries. "
+        "3) Enter query equals the specified text (e.g. 'Contract Review'). "
+        "4) Select date_filter that does NOT CONTAIN the excluded value (e.g. NOT 'All' → choose 'Today' or 'This Week'). "
+        "5) Apply the search/filter."
+    ),
     "LOG_EDITED": (
         "PLAYBOOK: 1) On AutoDoc, navigate to Logs/Time entries or the Matter page. "
         "2) Find the log entry where matter CONTAINS the given substring (e.g. 'Merger'). "
@@ -3259,6 +3328,13 @@ _TASK_PLAYBOOKS: Dict[str, str] = {
         "4) Verify search results appear."
     ),
     # ---- AutoDelivery (8006) additional ----
+    "DELETE_REVIEW": (
+        "PLAYBOOK: 1) On AutoDelivery/AutoRestaurant, find the restaurant matching ALL TASK_CONSTRAINTS: "
+        "   cuisine NOT 'American', name NOT 'Da Enzo', rating greater than X. "
+        "2) Open that restaurant's page. "
+        "3) Find the Reviews section. Find the review matching: review_rating equals '5', comment NOT equals excluded text. "
+        "4) Click Delete/Remove on that review. Confirm if prompted."
+    ),
     "RESTAURANT_FILTER": (
         "PLAYBOOK: 1) On AutoDelivery, find the cuisine filter/dropdown. "
         "2) For NOT CONTAIN 'Portuguese': do NOT select Portuguese - select any other cuisine or use the filter. "
@@ -3304,7 +3380,17 @@ _TASK_PLAYBOOKS: Dict[str, str] = {
         "2) Click it to open your wishlist. "
         "3) Verify saved/wishlisted hotels are visible."
     ),
+    "FAQ_OPENED": (
+        "PLAYBOOK: 1) On AutoLodge, navigate to the FAQ or Help page (check navbar/footer). "
+        "2) Find the FAQ item where the question CONTAINS the specified text (e.g. 'How do'). "
+        "3) Click on that FAQ item to expand/open it."
+    ),
     # ---- AutoConnect (8008) additional ----
+    "JOBS_NAVBAR": (
+        "PLAYBOOK: 1) On AutoConnect, look at the top navigation bar. "
+        "2) Find and click the 'Jobs' tab/link in the navbar. "
+        "3) Verify the jobs listing page is visible."
+    ),
     "EDIT_PROFILE": (
         "PLAYBOOK: 1) On AutoConnect, navigate to your Profile (click avatar or 'My Profile'). "
         "2) Click Edit Profile / pencil icon. "
@@ -3319,6 +3405,17 @@ _TASK_PLAYBOOKS: Dict[str, str] = {
         "4) Click Post/Submit."
     ),
     # ---- AutoHire (8009) additional ----
+    "EDIT_PROFILE_TITLE": (
+        "PLAYBOOK: 1) On AutoHire, navigate to your profile or profile settings. "
+        "2) Find the title/headline field. "
+        "3) Click Edit, clear the existing title, and type the value from TASK_CONSTRAINTS (equals the specified value). "
+        "4) Save/submit the change."
+    ),
+    "POST_A_JOB": (
+        "PLAYBOOK: 1) On AutoHire, look for the 'Post a job' button (usually on the Jobs or Home page). "
+        "2) Click 'Post a job' to initiate the job posting process. "
+        "3) The source/button should CONTAIN 'utto' (i.e. it's a button click action)."
+    ),
     "NAVBAR_EXPERTS_CLICK": (
         "PLAYBOOK: 1) On AutoHire, look at the top navigation bar. "
         "2) Find and click the 'Experts' link/option. "

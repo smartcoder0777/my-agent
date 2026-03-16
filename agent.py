@@ -3236,88 +3236,48 @@ def _llm_decide(
     all_creds = {**creds_from_task, **creds_from_data}
 
     system_msg = (
-        "You are a web automation agent. You will be given a task, the current browser state, and history. "
-        "Return JSON only (no markdown, no explanation). "
-        "Return a JSON object with EXACTLY these keys: action, candidate_id, text, url, evaluation_previous_goal, memory, next_goal. "
-        "\n"
-        "ACTION RULES:\n"
-        "- action must be one of: click, type, select, navigate, scroll_down, scroll_up, done\n"
-        "- For click/type/select: candidate_id must be an integer (index from BROWSER_STATE list)\n"
-        "- For type/select: text must be non-empty\n"
-        "- For navigate: url must be a full URL. Preserve existing query params (e.g., ?seed=X)\n"
-        "- Use done ONLY when the task is clearly and fully completed\n"
-        "\n"
-        "STRICT VALUE COPYING (CRITICAL):\n"
-        "- Copy ALL values EXACTLY as provided in TASK_CREDENTIALS or TASK_CONSTRAINTS 'equals' fields\n"
-        "- Do NOT correct typos, do NOT remove numbers, do NOT truncate strings\n"
-        "- Example: if task says 'Sofia 4', type 'Sofia 4' not 'Sofia'\n"
-        "\n"
-        "CONSTRAINT HANDLING:\n"
-        "- TASK_CONSTRAINTS lists ALL field constraints for this task\n"
-        "- 'equals' → type/select EXACTLY that value\n"
-        "- 'not_equals' → choose ANY valid value DIFFERENT from the listed one\n"
-        "  (e.g. card_number not '5500000000000004' → use '4111111111111111')\n"
-        "  (e.g. expiration not '06/26' → use '12/27')\n"
-        "  (e.g. destination not 'Business Tower...' → type any other real address)\n"
-        "- 'contains' → the item's field value must include that substring (use to identify the item)\n"
-        "- 'not_contains' → the item's field value must NOT include that substring\n"
-        "- 'greater_than'/'less_than' → numeric or date comparison (use to identify/filter items)\n"
-        "- 'not_in' → the item's field must NOT be any of the listed values\n"
-        "\n"
-        "FINDING THE RIGHT ITEM:\n"
-        "- When a task has multiple constraints, use list_cards or search_text to browse items\n"
-        "- Check ALL constraints against each candidate item before selecting it\n"
-        "- For email tasks: match subject AND sender constraints simultaneously\n"
-        "- For task management: match name, description, date, AND priority constraints\n"
-        "- For booking: match rating, price, location, host, reviews, amenities, title constraints\n"
-        "\n"
-        "CREDENTIAL HANDLING:\n"
-        "- TASK_CREDENTIALS contains extracted field values (credentials + form fields)\n"
-        "- Map 'username'/'signup_username' → username input. USE THE EXACT VALUE including any trailing spaces.\n"
-        "- Map 'email'/'signup_email' → email input. USE THE EXACT VALUE including trailing spaces.\n"
-        "- Map 'password'/'signup_password' → password input\n"
-        "- Map 'cvv' → CVV/security code input\n"
-        "- Map 'zipcode' → ZIP/postal code input\n"
-        "- Map 'country' → country selector/input\n"
-        "- Map 'job_title' → type the EXACT title. If 'job_title_contains' exists, type any title CONTAINING that substring.\n"
-        "- IMPORTANT: Credentials like 'user ' (with space) MUST be typed with the trailing space. Use type action with the exact string.\n"
-        "\n"
-        "MULTI-STEP TASKS:\n"
-        "- For tasks requiring login THEN another action: first complete the full login, then do the secondary action\n"
-        "- Track progress in memory: store what you've done and what remains\n"
-        "\n"
-        "HTML INSPECTION TOOLS (use when needed to find items):\n"
-        "Return {\"tool\": \"<name>\", \"args\": {...}} instead of an action. Max 2 tool calls per step.\n"
-        "Tools: search_text({query,regex?,case_sensitive?,max_matches?,context_chars?}); "
-        "visible_text({max_chars?}); css_select({selector,max_nodes?}); xpath_select({xpath,max_nodes?}); "
-        "extract_forms({max_forms?,max_inputs?}); list_links({max_links?,context_max?,href_regex?,text_regex?}); "
-        "list_candidates({max_n?}); list_cards({max_cards?,max_text?,max_actions_per_card?})."
+        "You are a web automation agent. Return JSON only (no markdown). "
+        "Keys: action, candidate_id, text, url, evaluation_previous_goal, memory, next_goal.\n"
+        "action: click|type|select|navigate|scroll_down|scroll_up|done. "
+        "click/type/select: candidate_id=integer from BROWSER_STATE. "
+        "navigate: url=full URL (keep ?seed=X param). "
+        "done: only when task is fully completed.\n"
+        "RULES: Copy values EXACTLY from TASK_CREDENTIALS/TASK_CONSTRAINTS (include trailing spaces). "
+        "equals→type exact value. not_equals→use any OTHER value. contains→find item with that substring. "
+        "not_contains/not_in→find item WITHOUT that value. greater/less→numeric comparison.\n"
+        "CREDENTIALS: username/email may have trailing spaces - type them exactly as shown in quotes. "
+        "job_title_contains→type any title CONTAINING that substring.\n"
+        "MULTI-STEP: complete login first, then the secondary action. Track progress in memory.\n"
+        "TOOLS: Return {\"tool\":\"<name>\",\"args\":{...}} to inspect page. Max 1 tool per step. "
+        "Tools: list_cards({max_cards?,max_text?}); search_text({query}); list_links({}); extract_forms({})."
     )
 
     history_lines: List[str] = []
-    for h in (history or [])[-6:]:
+    for h in (history or [])[-3:]:
         step = h.get("step", "?")
         action = h.get("action", "")
         cid = h.get("candidate_id")
-        text = h.get("text", "")
+        text = str(h.get("text", ""))[:60]
         ok = h.get("exec_ok", True)
         err = h.get("error")
-        suffix = "OK" if ok else f"FAILED err={str(err)[:80]}"
-        history_lines.append(f"{step}. {action} cid={cid} text={text} [{suffix}]")
+        suffix = "OK" if ok else f"FAIL:{str(err)[:40]}"
+        history_lines.append(f"{step}.{action} cid={cid} t={text} [{suffix}]")
 
     hint = _history_hint(history)
 
     structured = _structured_hints(task, candidates)
 
+    # Only include cards on early steps to save tokens
     cards_preview = ""
-    try:
-        cards_obj = _tool_list_cards(candidates=candidates, max_cards=12, max_text=420, max_actions_per_card=3)
-        if isinstance(cards_obj, dict) and cards_obj.get("ok") and cards_obj.get("cards"):
-            cards_preview = json.dumps(cards_obj.get("cards"), ensure_ascii=True)
-            if len(cards_preview) > 2400:
-                cards_preview = cards_preview[:2397] + "..."
-    except Exception:
-        cards_preview = ""
+    if int(step_index) <= 3:
+        try:
+            cards_obj = _tool_list_cards(candidates=candidates, max_cards=8, max_text=200, max_actions_per_card=2)
+            if isinstance(cards_obj, dict) and cards_obj.get("ok") and cards_obj.get("cards"):
+                cards_preview = json.dumps(cards_obj.get("cards"), ensure_ascii=True)
+                if len(cards_preview) > 900:
+                    cards_preview = cards_preview[:897] + "..."
+        except Exception:
+            cards_preview = ""
 
     agent_mem = ""
     try:
@@ -3337,32 +3297,38 @@ def _llm_decide(
             # Show the value in quotes so trailing/leading spaces are visible
             creds_block += f"  {k}: '{v}'\n"
 
+    # Cap large sections to control per-step token costs
+    page_summary_capped = page_summary[:700] if page_summary else ""
+    # DOM digest only on step 0 (first look)
+    dom_digest_capped = dom_digest[:300] if dom_digest and int(step_index) <= 1 else ""
+    structured_str = json.dumps(structured, ensure_ascii=True)
+    if len(structured_str) > 900:
+        structured_str = structured_str[:897] + "..."
+    website_ctx_short = (website_ctx[:250] + "...") if len(website_ctx) > 250 else website_ctx
+    playbook_capped = (playbook[:400] + "...") if len(playbook) > 400 else playbook
+
     user_msg = (
         f"TASK: {task}\n"
-        f"TASK_TYPE: {task_type}\n"
-        f"WEBSITE: {website_name}\n"
-        f"STEP: {int(step_index)}\n"
-        f"URL: {url}\n\n"
-        + (f"WEBSITE_CONTEXT:\n{website_ctx}\n\n" if website_ctx else "")
+        f"TYPE:{task_type} SITE:{website_name} STEP:{int(step_index)} URL:{url}\n\n"
+        + (f"SITE_HINTS: {website_ctx_short}\n\n" if website_ctx_short else "")
         + (creds_block + "\n" if creds_block else "")
         + (constraints_block + "\n\n" if constraints_block else "")
-        + f"{playbook}\n\n"
-        + f"CURRENT STATE (TEXT SUMMARY):\n{page_summary}\n\n"
-        + (f"DOM DIGEST (STRUCTURED):\n{dom_digest}\n\n" if dom_digest else "")
-        + (f"CARDS (GROUPED CLICKABLE CONTEXTS JSON):\n{cards_preview}\n\n" if cards_preview else "")
-        + f"STRUCTURED STATE (JSON):\n{json.dumps(structured, ensure_ascii=True)}\n\n"
-        + (f"HISTORY (last steps):\n{chr(10).join(history_lines)}\n\n" if history_lines else "")
-        + (f"STATE HINT: {extra_hint}\n\n" if extra_hint else "")
-        + (f"AGENT MEMORY:\n{agent_mem}\n" if agent_mem else "")
-        + (f"STATE DELTA (prev -> current): {state_delta}\n\n" if state_delta else "")
-        + "BROWSER_STATE (interactive elements):\n" + browser_state + "\n\n"
-        + "Return ONE JSON action for this step only. "
-        + "Provide evaluation_previous_goal, memory, next_goal (1 sentence each)."
+        + f"{playbook_capped}\n\n"
+        + f"PAGE:\n{page_summary_capped}\n\n"
+        + (f"DOM:\n{dom_digest_capped}\n\n" if dom_digest_capped else "")
+        + (f"CARDS:\n{cards_preview}\n\n" if cards_preview else "")
+        + f"STATE:\n{structured_str}\n\n"
+        + (f"HISTORY:\n{chr(10).join(history_lines)}\n\n" if history_lines else "")
+        + (f"HINT: {extra_hint}\n\n" if extra_hint else "")
+        + (f"MEMORY:\n{agent_mem}\n" if agent_mem else "")
+        + (f"DELTA: {str(state_delta)[:200]}\n\n" if state_delta else "")
+        + "BROWSER_STATE:\n" + browser_state + "\n\n"
+        + "ONE JSON action only."
     )
 
     model = os.getenv("OPENAI_MODEL", "gpt-4o")
     temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.2"))
-    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "600"))
+    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "350"))
 
     usages: List[Dict[str, Any]] = []
     tool_calls = 0

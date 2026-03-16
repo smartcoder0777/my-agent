@@ -1337,24 +1337,51 @@ def _extract_credentials_from_task(task: str) -> Dict[str, str]:
         (r"reviews?", "reviews"),
     ]
 
-    for field_pat, key in patterns:
-        # Check it's a proper equals (not "not equals")
-        m = re.search(
-            r"(?<!\w)" + field_pat + r"\s+equals?\s+['\"]?([^\s,'\"\n\]]+)['\"]?",
-            t, re.IGNORECASE
-        )
-        if m:
-            # Verify not preceded by "not"
-            prefix = t[max(0, m.start()-5):m.start()].lower()
-            if "not" not in prefix:
-                val = m.group(1).strip().rstrip(".,;:")
-                if val and key not in creds:
-                    creds[key] = val
+    def _extract_field_equals(field_pat: str) -> Optional[str]:
+        """Extract exact value for field=X, preserving spaces inside quotes."""
+        # Priority 1: single-quoted value (e.g., username equals 'user ')
+        for pat in [
+            r"(?<!\w)" + field_pat + r"\s+equals?\s+'([^']*)'",
+            r"(?<!\w)" + field_pat + r'\s+equals?\s+"([^"]*)"',
+            r"(?<!\w)" + field_pat + r"\s+equals?\s+([^\s,'\"\n\]]+)",
+        ]:
+            mm = re.search(pat, t, re.IGNORECASE)
+            if mm:
+                prefix = t[max(0, mm.start()-5):mm.start()].lower()
+                if "not" in prefix:
+                    continue
+                return mm.group(1).rstrip(".,;:")
+        return None
 
-    # Special: "writing a title of job for 'X'"
-    m = re.search(r"writing\s+a\s+title\s+of\s+job\s+for\s+['\"]([^'\"]+)['\"]", t, re.IGNORECASE)
+    for field_pat, key in patterns:
+        if key not in creds:
+            val = _extract_field_equals(field_pat)
+            if val is not None:
+                creds[key] = val
+
+    # Special: "writing a title of job for 'X'" OR "title of job for 'X'"
+    m = re.search(r"writing\s+a\s+(?:strong\s+)?title\s+of\s+(?:the\s+)?job\s+for\s+'([^']+)'", t, re.IGNORECASE)
+    if not m:
+        m = re.search(r"title\s+of\s+(?:the\s+)?job\s+for\s+'([^']+)'", t, re.IGNORECASE)
     if m:
-        creds["job_title"] = m.group(1).strip()
+        creds["job_title"] = m.group(1)
+
+    # Special: job title from CONTAINS constraint "query CONTAINS 'X'" (write any title containing X)
+    m2 = re.search(r"job\s+posting.*?query\s+CONTAINS\s+'([^']+)'", t, re.IGNORECASE)
+    if not m2:
+        m2 = re.search(r"writing.*?title.*?(?:query\s+)?CONTAINS\s+'([^']+)'", t, re.IGNORECASE)
+    if m2 and "job_title" not in creds:
+        creds["job_title_contains"] = m2.group(1)
+
+    # Colon-separated credentials: "username:' '" or "username: ' '"
+    for field_label, key in [("username", "username"), ("email", "email"), ("password", "password")]:
+        if key not in creds:
+            m3 = re.search(
+                r"\b" + field_label + r"\s*:\s*'([^']*)'",
+                t, re.IGNORECASE
+            )
+            if m3:
+                creds[key] = m3.group(1)
 
     return creds
 
@@ -1505,6 +1532,12 @@ def _classify_task(task: str) -> str:
         return "ENTER_DESTINATION"
     if re.search(r"destination\s+(value\s+)?that\s+is\s+NOT", t, re.IGNORECASE):
         return "ENTER_DESTINATION"
+    if re.search(r"enter\s+(and\s+select\s+)?a\s+location", t, re.IGNORECASE):
+        return "ENTER_LOCATION"
+    if re.search(r"location\s+equals\s+['\"]", t, re.IGNORECASE):
+        return "ENTER_LOCATION"
+    if re.search(r"search\s+ride\s+(details\s+)?where\s+the\s+location", t, re.IGNORECASE):
+        return "SEARCH_RIDE"
     if re.search(r"(search|search\s+for)\s+.*location\s+.*destination", t, re.IGNORECASE):
         return "SEARCH_LOCATION"
     if re.search(r"search\s+location\s+(details|to\s+find|for)", t, re.IGNORECASE):
@@ -1517,16 +1550,18 @@ def _classify_task(task: str) -> str:
         return "CANCEL_RESERVATION"
     if re.search(r"select\s+(a\s+)?date\s+for\s+(the\s+|your\s+)?trip", t, re.IGNORECASE):
         return "SELECT_DATE"
-    if re.search(r"select\s+(a\s+)?time\s+for\s+(my\s+|your\s+)?booking", t, re.IGNORECASE):
+    if re.search(r"select\s+(a\s+)?time\s+for\s+(my\s+|your\s+)?trip", t, re.IGNORECASE):
+        return "SELECT_TIME"
+    if re.search(r"select\s+time\s+for\s+my\s+trip", t, re.IGNORECASE):
         return "SELECT_TIME"
     if re.search(r"next\s+pickup", t, re.IGNORECASE):
         return "NEXT_PICKUP"
 
     # ---- AutoMail (8005) ----
     if re.search(r"mark\s+as\s+spam", t, re.IGNORECASE):
-        return "EMAIL_MARK_SPAM"
+        return "MARK_AS_SPAM"
     if re.search(r"(mark|move)\s+.*(spam|junk)", t, re.IGNORECASE):
-        return "EMAIL_MARK_SPAM"
+        return "MARK_AS_SPAM"
     if re.search(r"star\s+the\s+email", t, re.IGNORECASE):
         return "STAR_AN_EMAIL"
     if re.search(r"archive\s+the\s+email", t, re.IGNORECASE):
@@ -1535,8 +1570,14 @@ def _classify_task(task: str) -> str:
         return "DELETE_EMAIL"
     if re.search(r"forward\s+the\s+email", t, re.IGNORECASE):
         return "FORWARD_EMAIL"
-    if re.search(r"mark.*email.*important", t, re.IGNORECASE):
+    if re.search(r"mark.*email.*important|mark.*important.*email", t, re.IGNORECASE):
         return "MARK_EMAIL_AS_IMPORTANT"
+    if re.search(r"mark\s+(the\s+)?email\s+as\s+unread", t, re.IGNORECASE):
+        return "MARK_AS_UNREAD"
+    if re.search(r"view\s+the\s+email\s+where", t, re.IGNORECASE):
+        return "VIEW_EMAIL"
+    if re.search(r"change\s+the\s+application\s+theme", t, re.IGNORECASE):
+        return "THEME_CHANGED"
     if re.search(r"edit.*draft.*email", t, re.IGNORECASE):
         return "EDIT_DRAFT_EMAIL"
     if re.search(r"(next|go\s+to\s+the\s+next)\s+page\s+of\s+emails", t, re.IGNORECASE):
@@ -1559,6 +1600,8 @@ def _classify_task(task: str) -> str:
         return "SELECT_WEEK"
     if re.search(r"switch\s+to\s+month\s+view", t, re.IGNORECASE):
         return "SELECT_MONTH"
+    if re.search(r"switch\s+to\s+day\s+view", t, re.IGNORECASE):
+        return "SELECT_DAY"
     if re.search(r"switch\s+to\s+5.?day\s+view", t, re.IGNORECASE):
         return "SELECT_FIVE_DAYS"
     if re.search(r"(add\s+|click.*)\s*add\s+calendar\s+button", t, re.IGNORECASE):
@@ -1567,16 +1610,26 @@ def _classify_task(task: str) -> str:
         return "CREATE_CALENDAR"
     if re.search(r"add\s+an?\s+attendee\s+to\s+the\s+event", t, re.IGNORECASE):
         return "EVENT_ADD_ATTENDEE"
+    if re.search(r"remove\s+an?\s+attendee\s+from\s+the\s+event", t, re.IGNORECASE):
+        return "EVENT_REMOVE_ATTENDEE"
     if re.search(r"delete\s+an?\s+added\s+event", t, re.IGNORECASE):
         return "DELETE_ADDED_EVENT"
     if re.search(r"cancel\s+an?\s+event", t, re.IGNORECASE):
         return "CANCEL_ADD_EVENT"
+    if re.search(r"open\s+the\s+event\s+creation\s+wizard", t, re.IGNORECASE):
+        return "EVENT_WIZARD_OPEN"
+    if re.search(r"click\s+on\s+cell\s+for\s+a\s+date", t, re.IGNORECASE):
+        return "CELL_CLICKED"
+    if re.search(r"click.*cell.*in\s+the\s+5\s+days\s+view", t, re.IGNORECASE):
+        return "CELL_CLICKED"
     if re.search(r"add\s+a\s+new\s+calendar\s+event", t, re.IGNORECASE):
         return "NEW_CALENDAR_EVENT_ADDED"
     if re.search(r"add\s+an?\s+event\b", t, re.IGNORECASE):
         return "ADD_EVENT"
     if re.search(r"(show|view)\s+.*pending\s+events", t, re.IGNORECASE):
         return "VIEW_PENDING_EVENTS"
+    if re.search(r"show\s+me\s+results\s+for\s+a\s+search\s+query", t, re.IGNORECASE):
+        return "SEARCH_SUBMIT"
 
     # ---- AutoList (8011) ----
     if re.search(r"add\s+members?\s+to\s+the\s+team", t, re.IGNORECASE):
@@ -1587,15 +1640,35 @@ def _classify_task(task: str) -> str:
         return "AUTOLIST_EDIT_TASK_MODAL_OPENED"
     if re.search(r"button\s+to\s+add\s+a\s+task\s+is\s+clicked", t, re.IGNORECASE):
         return "AUTOLIST_ADD_TASK_CLICKED"
+    if re.search(r"change\s+the\s+priority\s+to", t, re.IGNORECASE):
+        return "AUTOLIST_SELECT_TASK_PRIORITY"
+    if re.search(r"cancel\s+creating\s+the\s+task", t, re.IGNORECASE):
+        return "AUTOLIST_CANCEL_TASK_CREATION"
+    if re.search(r"create\s+a\s+team\s+whose", t, re.IGNORECASE):
+        return "AUTOLIST_TEAM_CREATED"
+    if re.search(r"delete\s+task\s+whose", t, re.IGNORECASE):
+        return "AUTOLIST_DELETE_TASK"
+    if re.search(r"add\s+a\s+task\s+whose", t, re.IGNORECASE):
+        return "AUTOLIST_TASK_ADDED"
     if re.search(r"add\s+a\s+task\s+where", t, re.IGNORECASE):
         return "AUTOLIST_TASK_ADDED"
 
     # ---- AutoMedic (8013) ----
+    if re.search(r"(show|retrieve)\s+details\s+(for\s+a\s+doctor|of\s+the\s+doctor\s+education|of\s+a\s+doctor)", t, re.IGNORECASE):
+        if re.search(r"education|certif", t, re.IGNORECASE):
+            return "VIEW_DOCTOR_EDUCATION"
+        if re.search(r"availab", t, re.IGNORECASE):
+            return "VIEW_DOCTOR_AVAILABILITY"
+        return "VIEW_DOCTOR_PROFILE"
     if re.search(r"show\s+details\s+for\s+a\s+doctor", t, re.IGNORECASE):
         return "VIEW_DOCTOR_PROFILE"
-    if re.search(r"show\s+me\s+information\s+about\s+doctors", t, re.IGNORECASE):
+    if re.search(r"retrieve\s+details\s+of\s+the\s+doctor\s+education", t, re.IGNORECASE):
+        return "VIEW_DOCTOR_EDUCATION"
+    if re.search(r"show\s+me\s+the\s+availability\s+details\s+for\s+a\s+doctor", t, re.IGNORECASE):
+        return "VIEW_DOCTOR_AVAILABILITY"
+    if re.search(r"show\s+me\s+(details\s+about\s+)?doctors", t, re.IGNORECASE):
         return "SEARCH_DOCTORS"
-    if re.search(r"(search|retrieve)\s+(medical|details of medical)", t, re.IGNORECASE):
+    if re.search(r"(search|retrieve)\s+(medical|details\s+of\s+medical)", t, re.IGNORECASE):
         return "SEARCH_MEDICAL_ANALYSIS"
     if re.search(r"view\s+medical\s+analysis", t, re.IGNORECASE):
         return "VIEW_MEDICAL_ANALYSIS"
@@ -1603,18 +1676,22 @@ def _classify_task(task: str) -> str:
         return "OPEN_APPOINTMENT_FORM"
     if re.search(r"open\s+contact\s+doctor\s+form", t, re.IGNORECASE):
         return "OPEN_CONTACT_DOCTOR_FORM"
+    if re.search(r"contact\s+a\s+doctor\s+where", t, re.IGNORECASE):
+        return "DOCTOR_CONTACTED_SUCCESSFULLY"
     if re.search(r"contact\s+(a\s+)?doctor", t, re.IGNORECASE):
         return "CONTACT_DOCTOR"
     if re.search(r"retrieve\s+details\s+of\s+appointments", t, re.IGNORECASE):
         return "SEARCH_APPOINTMENT"
     if re.search(r"request\s+a\s+quick\s+appointment", t, re.IGNORECASE):
         return "REQUEST_QUICK_APPOINTMENT"
-    if re.search(r"doctor.*education", t, re.IGNORECASE):
+    if re.search(r"doctor.*education|education.*doctor", t, re.IGNORECASE):
         return "VIEW_DOCTOR_EDUCATION"
 
     # ---- AutoConnect (8008) ----
     if re.search(r"comment\s+on\s+the\s+post", t, re.IGNORECASE):
         return "COMMENT_ON_POST"
+    if re.search(r"save\s+the\s+post\s+where", t, re.IGNORECASE):
+        return "SAVE_POST"
     if re.search(r"follow\s+the\s+company\s+page", t, re.IGNORECASE):
         return "FOLLOW_PAGE"
     if re.search(r"unfollow\s+the\s+company\s+page", t, re.IGNORECASE):
@@ -1625,6 +1702,12 @@ def _classify_task(task: str) -> str:
         return "SEARCH_USERS"
     if re.search(r"go\s+back\s+to\s+all\s+jobs", t, re.IGNORECASE):
         return "BACK_TO_ALL_JOBS"
+    if re.search(r"navigate\s+to\s+the\s+'?home'?\s+tab", t, re.IGNORECASE):
+        return "HOME_NAVBAR"
+    if re.search(r"show\s+me\s+my\s+hidden\s+posts", t, re.IGNORECASE):
+        return "VIEW_HIDDEN_POSTS"
+    if re.search(r"search\s+for\s+jobs\s+where\s+the\s+query", t, re.IGNORECASE):
+        return "SEARCH_JOBS"
     if re.search(r"edit\s+profile\s+to\s+set\s+the\s+bio", t, re.IGNORECASE):
         return "EDIT_PROFILE_BIO"
 
@@ -1649,17 +1732,23 @@ def _classify_task(task: str) -> str:
         return "NAVBAR_HIRES_CLICK"
     if re.search(r"searches?\s+for\s+a\s+skill", t, re.IGNORECASE):
         return "SEARCH_SKILL"
-    if re.search(r"(job\s+posting|writing\s+a\s+title\s+of\s+job)", t, re.IGNORECASE):
-        return "JOB_POSTING"
+    if re.search(r"(job\s+posting|writing\s+(a\s+)?(strong\s+)?title\s+of\s+(the\s+)?job)", t, re.IGNORECASE):
+        return "WRITE_JOB_TITLE"
+    if re.search(r"edit\s+profile\s+about", t, re.IGNORECASE):
+        return "EDIT_ABOUT"
+    if re.search(r"update\s+my\s+profile\s+about\s+section", t, re.IGNORECASE):
+        return "EDIT_ABOUT"
     if re.search(r"edit\s+profile\s+(location|email)", t, re.IGNORECASE):
         if "location" in t:
             return "EDIT_PROFILE_LOCATION"
+        return "EDIT_PROFILE_EMAIL"
+    if re.search(r"edit\s+profile\s+email", t, re.IGNORECASE):
         return "EDIT_PROFILE_EMAIL"
 
     # ---- AutoLodge (8007) ----
     if re.search(r"confirm\s+the\s+booking", t, re.IGNORECASE):
         return "BOOKING_CONFIRM"
-    if re.search(r"set\s+the\s+number\s+of\s+guests", t, re.IGNORECASE):
+    if re.search(r"(adjust|set|change)\s+the\s+number\s+of\s+guests", t, re.IGNORECASE):
         return "EDIT_NUMBER_OF_GUESTS"
     if re.search(r"(open\s+)?guest\s+selector\s+dropdown", t, re.IGNORECASE):
         return "PEOPLE_DROPDOWN_OPENED"
@@ -1667,9 +1756,13 @@ def _classify_task(task: str) -> str:
         return "PAYMENT_METHOD_SELECTED"
     if re.search(r"(reserve|book)\s+the\s+hotel", t, re.IGNORECASE):
         return "RESERVE_HOTEL"
+    if re.search(r"share\s+the\s+hotel\s+listing", t, re.IGNORECASE):
+        return "SHARE_HOTEL"
+    if re.search(r"show\s+(me\s+)?details\s+for\s+popular\s+hotels", t, re.IGNORECASE):
+        return "POPULAR_HOTELS_VIEWED"
     if re.search(r"search\s+for\s+hotels?", t, re.IGNORECASE):
         return "SEARCH_HOTEL"
-    if re.search(r"submit\s+a\s+review", t, re.IGNORECASE):
+    if re.search(r"submit\s+a\s+review\b(?!.*restaurant)", t, re.IGNORECASE):
         return "SUBMIT_REVIEW"
     if re.search(r"add\s+to\s+wishlist.*hotel", t, re.IGNORECASE):
         return "ADD_TO_WISHLIST_HOTEL"
@@ -1681,8 +1774,16 @@ def _classify_task(task: str) -> str:
         return "RESTAURANT_NEXT_PAGE"
     if re.search(r"go\s+back\s+to\s+the\s+previous\s+page\s+of\s+restaurants", t, re.IGNORECASE):
         return "RESTAURANT_PREV_PAGE"
+    if re.search(r"return\s+to\s+all\s+restaurants", t, re.IGNORECASE):
+        return "BACK_TO_ALL_RESTAURANTS"
+    if re.search(r"increase\s+the\s+quantity\s+of\s+the\s+item\s+in\s+the\s+cart", t, re.IGNORECASE):
+        return "ITEM_INCREMENTED"
     if re.search(r"search\s+for\s+restaurants?\s+(where|that)", t, re.IGNORECASE):
         return "SEARCH_DELIVERY_RESTAURANT"
+    if re.search(r"submit\s+(a\s+)?review\s+for\s+(a\s+)?restaurant", t, re.IGNORECASE):
+        return "REVIEW_SUBMITTED"
+    if re.search(r"add\s+an?\s+address\s+that\s+is", t, re.IGNORECASE):
+        return "ADDRESS_ADDED"
     if re.search(r"set\s+dropoff\s+preference", t, re.IGNORECASE):
         return "DROPOFF_PREFERENCE"
     if re.search(r"select\s+(a\s+)?delivery\s+priority", t, re.IGNORECASE):
@@ -1697,6 +1798,16 @@ def _classify_task(task: str) -> str:
     # ---- AutoRestaurant (8003) ----
     if re.search(r"search\s+for\s+restaurants?\s+where\s+the\s+query", t, re.IGNORECASE):
         return "SEARCH_RESTAURANT"
+    if re.search(r"please\s+collapse\s+the\s+menu", t, re.IGNORECASE):
+        return "COLLAPSE_MENU"
+    if re.search(r"click\s+the\s+contact\s+card\s+where", t, re.IGNORECASE):
+        return "CONTACT_CARD_CLICK"
+    if re.search(r"scroll\s+in\s+the\s+direction", t, re.IGNORECASE):
+        return "SCROLL_VIEW"
+    if re.search(r"show\s+details\s+for\s+the\s+help\s+category", t, re.IGNORECASE):
+        return "HELP_CATEGORY_SELECTED"
+    if re.search(r"(navigate\s+to|find)\s+the\s+help\s+page", t, re.IGNORECASE):
+        return "HELP_PAGE_VIEW"
     if re.search(r"(open|show).*guest.*selector.*dropdown.*number\s+of\s+people", t, re.IGNORECASE):
         return "PEOPLE_DROPDOWN_OPENED"
     if re.search(r"select.*country.*dropdown|please\s+select\s+the\s+country", t, re.IGNORECASE):
@@ -1715,6 +1826,16 @@ def _classify_task(task: str) -> str:
         return "VIEW_RESTAURANT"
 
     # ---- AutoShop (8002) ----
+    if re.search(r"update\s+quantity\s+of\s+item\s+with\s+title", t, re.IGNORECASE):
+        return "QUANTITY_CHANGED"
+    if re.search(r"update\s+the\s+quantity\s+of\s+the\s+item\s+in\s+my\s+cart", t, re.IGNORECASE):
+        return "QUANTITY_CHANGED"
+    if re.search(r"update\s+quantity\s+of\s+item", t, re.IGNORECASE):
+        return "QUANTITY_CHANGED"
+    if re.search(r"increase\s+the\s+quantity", t, re.IGNORECASE):
+        return "ITEM_INCREMENTED"
+    if re.search(r"show\s+details\s+for\s+a\s+product", t, re.IGNORECASE):
+        return "VIEW_DETAIL"
     if re.search(r"filter\s+to\s+show\s+only\s+products\s+in\s+the\s+category", t, re.IGNORECASE):
         return "CATEGORY_FILTER"
     if re.search(r"(show\s+me\s+my\s+saved\s+items|my\s+wishlist|show.*wishlist)", t, re.IGNORECASE):
@@ -1739,12 +1860,41 @@ def _classify_task(task: str) -> str:
         return "ADD_CLIENT"
     if re.search(r"add\s+a\s+new\s+matter", t, re.IGNORECASE):
         return "ADD_NEW_MATTER"
+    if re.search(r"search\s+for\s+matters?\s+where\s+the\s+query", t, re.IGNORECASE):
+        return "SEARCH_MATTER"
+    if re.search(r"show\s+me\s+details\s+for\s+clients?\s+whose", t, re.IGNORECASE):
+        return "FILTER_CLIENTS"
+    if re.search(r"show\s+me\s+matters?\s+where\s+the\s+status", t, re.IGNORECASE):
+        return "FILTER_MATTER_STATUS"
+    if re.search(r"show\s+me\s+details\s+about\s+a\s+document", t, re.IGNORECASE):
+        return "DOCUMENT_DELETED"
     if re.search(r"sort\s+matters?\s+so\s+that", t, re.IGNORECASE):
         return "SORT_MATTER_BY_CREATED_AT"
     if re.search(r"change\s+(user\s+)?name\s+to", t, re.IGNORECASE):
         return "CHANGE_USER_NAME"
     if re.search(r"show.*pending\s+events\s+on\s+the\s+calendar", t, re.IGNORECASE):
         return "VIEW_PENDING_EVENTS"
+    if re.search(r"add\s+a\s+new\s+calendar\s+event\s+where", t, re.IGNORECASE):
+        return "NEW_CALENDAR_EVENT_ADDED"
+
+    # ---- AutoBooks (8001) ----
+    if re.search(r"(delete|remove)\s+(your\s+)?(user[- _]?registered\s+)?book", t, re.IGNORECASE):
+        if re.search(r"\b(login|sign.?in)\b", t, re.IGNORECASE):
+            return "DELETE_BOOK"
+    if re.search(r"modify\s+your\s+book|edit\s+(your\s+)?book\s+where", t, re.IGNORECASE):
+        return "EDIT_BOOK"
+    if re.search(r"remove\s+from\s+the\s+reading\s+list", t, re.IGNORECASE):
+        return "REMOVE_FROM_READING_LIST"
+    if re.search(r"go\s+to\s+the\s+contact\s+page\s+and\s+send", t, re.IGNORECASE):
+        return "CONTACT_BOOK"
+    if re.search(r"register\s+with\s+the\s+following\s+username", t, re.IGNORECASE):
+        return "REGISTRATION_BOOK"
+
+    # ---- AutoCinema (8000) specific ----
+    if re.search(r"add\s+(to\s+)?watchlist", t, re.IGNORECASE):
+        return "ADD_TO_WATCHLIST"
+    if re.search(r"share\s+movie\s+details", t, re.IGNORECASE):
+        return "SHARE_MOVIE"
 
     # ---- AutoCinema/AutoBooks multi-step ----
     if re.search(r"\b(logout|sign.?out|log.?out)\b", t) and re.search(r"\b(login|sign.?in|log.?in)\b", t):
@@ -2109,6 +2259,37 @@ _TASK_PLAYBOOKS: Dict[str, str] = {
         "date = satisfying constraint, priority = exact value. "
         "3) Save."
     ),
+    "AUTOLIST_DELETE_TASK": (
+        "PLAYBOOK: 1) On AutoList, navigate to the Tasks section. "
+        "2) Use list_cards to see all tasks with fields: name, description, date, priority. "
+        "3) Find the task matching ALL TASK_CONSTRAINTS: "
+        "   - name NOT contains the excluded string "
+        "   - description contains the required substring "
+        "   - date less_than the given date "
+        "   - priority equals the given value. "
+        "4) Click that task's Delete/Trash/Remove button. "
+        "5) Confirm deletion if a confirmation dialog appears."
+    ),
+    "CONFIRM_AND_PAY": (
+        "PLAYBOOK: 1) You are on a lodging/accommodation booking site (AutoLodge). "
+        "2) Use list_cards to browse listings. Find the one matching ALL TASK_CONSTRAINTS: "
+        "   - guests_set: equals or NOT equals "
+        "   - title: NOT equals "
+        "   - price: less_equal or greater_than "
+        "   - host_name: contains "
+        "   - reviews: equals "
+        "   - amenities: NOT in list "
+        "   - rating: equals "
+        "   - location: contains "
+        "3) Click 'Book Now' or 'Reserve' on the matched listing. "
+        "4) Fill the payment form with EXACT values from TASK_CONSTRAINTS: "
+        "   - card_number: use a different card if NOT equals constraint "
+        "   - expiration: use a different date if NOT equals constraint "
+        "   - cvv: type EXACTLY as specified "
+        "   - zipcode: type EXACTLY as specified "
+        "   - country: type EXACTLY or choose from dropdown. "
+        "5) Submit/Confirm the booking."
+    ),
     # ---- AutoMedic (8013) ----
     "VIEW_DOCTOR_PROFILE": (
         "PLAYBOOK: 1) Browse doctor list using list_cards. "
@@ -2155,8 +2336,16 @@ _TASK_PLAYBOOKS: Dict[str, str] = {
         "3) Submit."
     ),
     "VIEW_DOCTOR_EDUCATION": (
-        "PLAYBOOK: 1) Find the doctor matching constraints. 2) View their profile. "
-        "3) Scroll to/click the Education section on their profile."
+        "PLAYBOOK: 1) On AutoMedic, browse the doctors list. "
+        "2) Find the doctor matching ALL TASK_CONSTRAINTS: "
+        "   - doctor_name equals/contains/NOT contains "
+        "   - speciality equals/NOT equals/contains "
+        "   - rating equals/greater_than/NOT equals "
+        "   - consultation_fee equals/less_equal "
+        "   - language equals/NOT contains. "
+        "3) Click on that doctor's card/row. "
+        "4) On their profile page, find the 'Education' or 'Certifications' tab/section. "
+        "5) Click it to reveal their education details."
     ),
     # ---- AutoConnect (8008) ----
     "COMMENT_ON_POST": (
@@ -2496,6 +2685,335 @@ _TASK_PLAYBOOKS: Dict[str, str] = {
         "4) Type the EXACT job title from TASK_CREDENTIALS['job_title'] or the task text. "
         "5) Submit/post the job if required."
     ),
+    "WRITE_JOB_TITLE": (
+        "PLAYBOOK: 1) Look for 'Post a Job' or '+' button to start a job posting. "
+        "2) Click it to open the job title input. "
+        "3) If TASK_CREDENTIALS has 'job_title', type that EXACTLY. "
+        "4) If TASK_CREDENTIALS has 'job_title_contains', type a job title that CONTAINS that substring "
+        "   (e.g. if contains='opers J' type 'Developers Jobs'). "
+        "5) Do NOT click submit/publish - just fill the title field as instructed."
+    ),
+    # ---- AutoRide (8012) ----
+    "ENTER_LOCATION": (
+        "PLAYBOOK: 1) Find the location/pickup input field (labeled 'location', 'from', 'pickup'). "
+        "2) Click it to focus. "
+        "3) Type the EXACT location string from TASK_CONSTRAINTS (equals constraint). "
+        "4) Wait for/click the matching autocomplete suggestion that matches exactly. "
+        "5) Confirm selection."
+    ),
+    "SEARCH_RIDE": (
+        "PLAYBOOK: 1) You are on AutoRide. Find the ride search/filter interface. "
+        "2) Constraints specify location, destination, and scheduled_time. "
+        "3) Apply filters or scroll through rides to find one matching ALL constraints. "
+        "4) For 'location NOT contains X': choose a location that does NOT include the excluded text. "
+        "5) For 'destination contains Y': find a ride whose destination matches. "
+        "6) For 'scheduled_time less_equal Z': pick a time at or before the given datetime. "
+        "7) Click on that matching ride entry to view details."
+    ),
+    "SELECT_TIME": (
+        "PLAYBOOK: 1) Find the time picker/selector on the trip booking page. "
+        "2) Look at the constraint: if 'GREATER THAN OR EQUAL TO X', select a time >= X. "
+        "   If 'LESS THAN X', select a time < X. "
+        "3) Click/select the appropriate time slot that satisfies the constraint."
+    ),
+    # ---- AutoCalendar (8010) ----
+    "SELECT_DAY": (
+        "PLAYBOOK: 1) Find the calendar view buttons (Day, Week, Month, 5-day). "
+        "2) Click the 'Day' button to switch to day view."
+    ),
+    "EVENT_WIZARD_OPEN": (
+        "PLAYBOOK: 1) Find the 'Add Event', '+ New Event', or '+' button on the calendar page. "
+        "2) Click it to open the event creation wizard/dialog. "
+        "3) If a title field appears, type a title that satisfies the CONTAINS constraint from the task. "
+        "4) Do NOT necessarily submit - the task may just require opening the wizard."
+    ),
+    "CELL_CLICKED": (
+        "PLAYBOOK: 1) Switch to the '5 days' view if not already there. "
+        "2) The task specifies a date AFTER X and a time BEFORE Y. "
+        "3) Find a cell in the calendar grid that is on a date after the given date "
+        "   AND in a time slot before the given time. "
+        "4) Click on that cell to select/create an event at that time."
+    ),
+    "EVENT_REMOVE_ATTENDEE": (
+        "PLAYBOOK: 1) Find an existing event on the calendar. "
+        "2) Click it to open event details. "
+        "3) Find the attendees list. "
+        "4) Find the attendee whose email does NOT match the excluded email. "
+        "5) Click Remove/Delete next to that attendee."
+    ),
+    "SEARCH_SUBMIT": (
+        "PLAYBOOK: 1) Find the search input on the calendar/current page. "
+        "2) Type the search query - use the value from TASK_CONSTRAINTS (contains constraint). "
+        "3) Press Enter or click the search button to submit."
+    ),
+    # ---- AutoShop (8002) ----
+    "VIEW_DETAIL": (
+        "PLAYBOOK: 1) Browse the product listing on AutoShop. "
+        "2) Use TASK_CONSTRAINTS to find the right product: brand equals/contains AND price constraints. "
+        "3) Click on the product card to open its detail page. "
+        "4) The task is complete when the product detail page is shown."
+    ),
+    "QUANTITY_CHANGED": (
+        "PLAYBOOK: 1) Navigate to the shopping cart (cart icon, top-right). "
+        "2) Find the item matching the title constraint (title equals X or NOT 'Y'). "
+        "3) Find the quantity input/stepper for that item. "
+        "4) Change the quantity to the specified new_quantity value. "
+        "5) Confirm/update the cart."
+    ),
+    "ITEM_INCREMENTED": (
+        "PLAYBOOK: 1) Navigate to the cart or the item's cart section. "
+        "2) Find the item quantity control (+/- buttons or number input). "
+        "3) Increment the quantity to reach the target value (e.g. 5). "
+        "4) Confirm the quantity update."
+    ),
+    # ---- AutoConnect (8008) ----
+    "SAVE_POST": (
+        "PLAYBOOK: 1) On AutoConnect, browse the feed/posts. "
+        "2) Find the post matching ALL constraints: author CONTAINS X AND content CONTAINS Y. "
+        "3) Find the Save/Bookmark button on that post (often a bookmark icon). "
+        "4) Click it to save the post."
+    ),
+    "HOME_NAVBAR": (
+        "PLAYBOOK: 1) Find the navigation bar at the top. "
+        "2) Look for 'Home' tab/link. "
+        "3) Click it to navigate to the Home section."
+    ),
+    "VIEW_HIDDEN_POSTS": (
+        "PLAYBOOK: 1) Go to your profile or account settings on AutoConnect. "
+        "2) Look for 'Hidden Posts', 'Privacy', or 'Activity' section. "
+        "3) Navigate to the hidden posts section to view them."
+    ),
+    "SEARCH_JOBS": (
+        "PLAYBOOK: 1) On AutoConnect, find the Jobs section (via navbar or search). "
+        "2) Find the search/filter input for jobs. "
+        "3) Type a search query that does NOT contain the excluded term (from NOT CONTAIN constraint). "
+        "4) Submit the search."
+    ),
+    # ---- AutoMail (8005) ----
+    "MARK_AS_SPAM": (
+        "PLAYBOOK: 1) On AutoMail, browse the inbox/email list. "
+        "2) Find the email matching ALL constraints: "
+        "   - subject CONTAINS the required substring "
+        "   - from_email does NOT CONTAIN the excluded substring. "
+        "3) Click on that email to open it, OR select it with a checkbox. "
+        "4) Find 'Mark as Spam', 'Report Spam', or 'Spam' button (toolbar or menu). "
+        "5) Click it."
+    ),
+    "MARK_AS_UNREAD": (
+        "PLAYBOOK: 1) Find the email matching ALL constraints: "
+        "   - from_email equals the given address "
+        "   - is_read equals False (already unread? - still find it). "
+        "2) Open the email or right-click/use menu. "
+        "3) Click 'Mark as Unread' option."
+    ),
+    "VIEW_EMAIL": (
+        "PLAYBOOK: 1) Browse the email list. "
+        "2) Find the email matching the constraint (subject NOT equals X, or subject contains Y). "
+        "3) Click on it to open and view it."
+    ),
+    "THEME_CHANGED": (
+        "PLAYBOOK: 1) On AutoMail, find the Settings/Preferences option (gear icon or settings menu). "
+        "2) Look for 'Theme', 'Appearance', or 'Display' settings. "
+        "3) Select 'Dark' theme. "
+        "4) Save/Apply the setting."
+    ),
+    # ---- AutoLodge (8007) ----
+    "SHARE_HOTEL": (
+        "PLAYBOOK: 1) Browse hotel listings on AutoLodge. "
+        "2) Find the hotel matching ALL constraints: location, host_name NOT contains, price > X, "
+        "   title NOT contains, amenities include Y, guests > Z. "
+        "3) Click on that hotel card. "
+        "4) Find the Share button on the hotel detail page. "
+        "5) Enter the recipient email address and send/share."
+    ),
+    "POPULAR_HOTELS_VIEWED": (
+        "PLAYBOOK: 1) On AutoLodge, look for a 'Popular Hotels' or 'Featured' section. "
+        "2) Apply filter for rating >= the specified value if a filter UI exists. "
+        "3) Click to view popular hotels or apply the rating filter."
+    ),
+    "EDIT_NUMBER_OF_GUESTS": (
+        "PLAYBOOK: 1) Browse hotel listings. "
+        "2) Find the listing matching ALL TASK_CONSTRAINTS: "
+        "   - guests_to less_than X "
+        "   - rating greater_than Y "
+        "   - title contains required substrings "
+        "   - amenities NOT in the excluded list "
+        "   - location NOT equals Z. "
+        "3) Click on that listing to open it. "
+        "4) Find the guests/people selector. "
+        "5) Set guests count to the specified target number (e.g. 2). "
+        "6) Confirm the change."
+    ),
+    # ---- AutoDelivery (8006) ----
+    "REVIEW_SUBMITTED": (
+        "PLAYBOOK: 1) On AutoDelivery, find the restaurant matching constraints: "
+        "   name contains X, OR the review fields. "
+        "2) Open the restaurant page or a past order. "
+        "3) Find the 'Write Review' or 'Rate' button. "
+        "4) Fill: author='James' (or as specified), rating=5 (or as specified, meeting >= constraint). "
+        "5) Submit the review."
+    ),
+    "BACK_TO_ALL_RESTAURANTS": (
+        "PLAYBOOK: 1) You are viewing a restaurant detail page on AutoDelivery. "
+        "2) The task specifies which restaurant: find one matching name equals X and cuisine contains Y. "
+        "3) Navigate to that restaurant's detail page. "
+        "4) Find the 'Back', '< All Restaurants', or 'Back to Restaurants' button. "
+        "5) Click it to return to the restaurant list."
+    ),
+    "ADDRESS_ADDED": (
+        "PLAYBOOK: 1) On AutoDelivery, find the delivery address section or settings. "
+        "2) Click 'Add Address' or similar. "
+        "3) Type the exact address string from the task: e.g. '202 Birch Lane, Lakeview'. "
+        "4) Fill any additional fields: preferences (contains required text), quantity, etc. "
+        "5) Save/confirm the address."
+    ),
+    # ---- AutoRestaurant (8003) ----
+    "COLLAPSE_MENU": (
+        "PLAYBOOK: 1) Browse restaurants on AutoRestaurant. "
+        "2) Find the restaurant matching constraints (rating NOT X, bookings equals Y, name NOT Z). "
+        "3) Click on that restaurant to view its menu. "
+        "4) Find the expanded menu section with a collapse/hide toggle. "
+        "5) Click it to collapse the menu."
+    ),
+    "CONTACT_CARD_CLICK": (
+        "PLAYBOOK: 1) Find the contact cards/methods section on the page. "
+        "2) Find the card whose type does NOT contain the excluded value (e.g. NOT 'Email'). "
+        "3) Click on that contact card."
+    ),
+    "SCROLL_VIEW": (
+        "PLAYBOOK: 1) Find the scrollable section that does NOT contain the excluded section name. "
+        "2) Scroll in the specified direction ('left' or 'right') on that section/carousel."
+    ),
+    "HELP_PAGE_VIEW": (
+        "PLAYBOOK: 1) Find the Help/FAQ link in the navigation or footer. "
+        "2) Click it to navigate to the Help page."
+    ),
+    "HELP_CATEGORY_SELECTED": (
+        "PLAYBOOK: 1) Navigate to the Help page. "
+        "2) Find the category matching the equals constraint (e.g. 'Reservations'). "
+        "3) Click on that help category."
+    ),
+    # ---- AutoDoc (8004) ----
+    "SEARCH_MATTER": (
+        "PLAYBOOK: 1) On AutoDoc, find the Matters search bar/input. "
+        "2) Type a search query that does NOT contain the excluded term. "
+        "3) Submit the search to find matching matters."
+    ),
+    "FILTER_CLIENTS": (
+        "PLAYBOOK: 1) On AutoDoc Clients page, find filter/search options. "
+        "2) Apply filters: status NOT 'X', matters NOT equals 'Y'. "
+        "3) Show the filtered client list."
+    ),
+    "FILTER_MATTER_STATUS": (
+        "PLAYBOOK: 1) On AutoDoc Matters page, find the status filter dropdown or search. "
+        "2) Filter by status that contains the required substring (e.g. 'ived' → 'Archived'). "
+        "3) Apply/submit the filter."
+    ),
+    "DOCUMENT_DELETED": (
+        "PLAYBOOK: 1) Navigate to Documents section on AutoDoc. "
+        "2) Find the document matching constraints: status NOT CONTAINS X, size > Y. "
+        "3) Select/click that document. "
+        "4) Find the Delete/Remove button and click it. "
+        "5) Confirm deletion."
+    ),
+    # ---- AutoMedic (8013) ----
+    "DOCTOR_CONTACTED_SUCCESSFULLY": (
+        "PLAYBOOK: 1) On AutoMedic, find the doctor matching ALL constraints: "
+        "   doctor_name, patient_name, subject NOT equals, urgency NOT equals, "
+        "   preferred_contact_method contains, patient_phone, patient_email NOT equals. "
+        "2) Open the Contact Doctor form for that doctor. "
+        "3) Fill in: patient_name (exact), patient_phone (exact), patient_email (NOT the excluded email, use any valid one). "
+        "4) Subject: NOT the excluded subject - use any valid medical subject. "
+        "5) Urgency: NOT the excluded value - pick any other option. "
+        "6) Preferred contact: must CONTAIN the specified substring (e.g. 'ither' → 'Either'). "
+        "7) Submit the form."
+    ),
+    "VIEW_DOCTOR_AVAILABILITY": (
+        "PLAYBOOK: 1) On AutoMedic, browse doctors list. "
+        "2) Find the doctor matching ALL constraints: "
+        "   doctor_name NOT X, speciality CONTAINS Y, rating NOT Z, "
+        "   consultation_fee <= W, language equals V. "
+        "3) Click on that doctor's card/profile. "
+        "4) Navigate to the Availability tab/section to view their schedule."
+    ),
+    # ---- AutoList (8011) ----
+    "AUTOLIST_SELECT_TASK_PRIORITY": (
+        "PLAYBOOK: 1) On AutoList, find the task list. "
+        "2) Find a task whose current priority is NOT the excluded value. "
+        "3) Click on that task's priority selector/dropdown. "
+        "4) Select 'High' (or the target priority value). "
+        "5) Save/confirm."
+    ),
+    "AUTOLIST_CANCEL_TASK_CREATION": (
+        "PLAYBOOK: 1) Start creating a new task: click 'Add Task' or '+'. "
+        "2) Fill in the fields as specified (name equals X, description NOT contains Y, date equals Z, priority equals W). "
+        "3) Instead of submitting, find and click 'Cancel', 'Discard', or 'X' to cancel the creation. "
+        "4) Do NOT save/submit the task."
+    ),
+    "AUTOLIST_TEAM_CREATED": (
+        "PLAYBOOK: 1) Navigate to the Teams section on AutoList. "
+        "2) Click 'Create Team' or '+'. "
+        "3) Fill in: name (must CONTAIN required substring), description (exact value from task), "
+        "   add member whose name contains required substring, assign role that is NOT the excluded value. "
+        "4) Save/create the team."
+    ),
+    # ---- AutoBooks (8001) ----
+    "DELETE_BOOK": (
+        "PLAYBOOK: 1) Login with the placeholder credentials (username=' ', password=' '). "
+        "2) Navigate to your books or the book matching the id constraint. "
+        "3) Find the book matching id equals X (from task or credentials). "
+        "4) Click Delete/Remove button. "
+        "5) Confirm deletion."
+    ),
+    "EDIT_BOOK": (
+        "PLAYBOOK: 1) Login with the credentials from the task (username, password). "
+        "2) Find the book matching ALL constraints: page_count >= X, author contains Y, rating <= Z, genres equals W. "
+        "3) Click Edit/Pencil icon on that book. "
+        "4) Modify the required fields. "
+        "5) Save changes."
+    ),
+    "REMOVE_FROM_READING_LIST": (
+        "PLAYBOOK: 1) Login with the placeholder credentials. "
+        "2) Navigate to your Reading List. "
+        "3) Find a book whose name is NOT the excluded title AND description is NOT the excluded description. "
+        "4) Click Remove/Delete from reading list on that book."
+    ),
+    "CONTACT_BOOK": (
+        "PLAYBOOK: 1) Navigate to the Contact page on AutoBooks. "
+        "2) Fill in the form: email NOT 'user1@site.com' (use any other email), "
+        "   subject NOT contains 'Order', name NOT contains 'Alice', "
+        "   message contains the required text (e.g. 'I\\'m writing to request support'). "
+        "3) Submit the contact form."
+    ),
+    "REGISTRATION_BOOK": (
+        "PLAYBOOK: 1) Navigate to the Register page on AutoBooks. "
+        "2) Fill in username, email, password with the placeholder values (often empty or space ' '). "
+        "3) Submit to register."
+    ),
+    # ---- AutoCinema (8000) ----
+    "ADD_TO_WATCHLIST": (
+        "PLAYBOOK: 1) Login first if required (username='user ', password='Passw0rd!'). "
+        "2) Browse the films list. "
+        "3) Find the film matching the constraint (genres NOT CONTAINS X means choose a film without that genre). "
+        "4) Click on that film to open its detail page. "
+        "5) Click the 'Add to Watchlist' button."
+    ),
+    "SHARE_MOVIE": (
+        "PLAYBOOK: 1) Browse films on AutoCinema. "
+        "2) Find the film matching the constraint (duration equals X minutes). "
+        "3) Click on that film to open its detail page. "
+        "4) Find and click the Share button. "
+        "5) Complete the share action."
+    ),
+    # ---- AutoHire (8009) ----
+    "EDIT_ABOUT": (
+        "PLAYBOOK: 1) Navigate to your profile on AutoHire. "
+        "2) Find the 'About' or 'Bio' section. "
+        "3) Click Edit/pencil icon to enter edit mode. "
+        "4) If constraint is NOT contains X: clear the field and type any text that does NOT contain X. "
+        "5) If constraint is description equals X: type exactly that description. "
+        "6) Save the changes."
+    ),
     # --- General fallback ---
     "GENERAL": (
         "PLAYBOOK: Analyze the task carefully, identify the key action required, "
@@ -2755,13 +3273,14 @@ def _llm_decide(
         "\n"
         "CREDENTIAL HANDLING:\n"
         "- TASK_CREDENTIALS contains extracted field values (credentials + form fields)\n"
-        "- Map 'username'/'signup_username' → username input\n"
-        "- Map 'email'/'signup_email' → email input\n"
+        "- Map 'username'/'signup_username' → username input. USE THE EXACT VALUE including any trailing spaces.\n"
+        "- Map 'email'/'signup_email' → email input. USE THE EXACT VALUE including trailing spaces.\n"
         "- Map 'password'/'signup_password' → password input\n"
         "- Map 'cvv' → CVV/security code input\n"
         "- Map 'zipcode' → ZIP/postal code input\n"
         "- Map 'country' → country selector/input\n"
-        "- Map 'job_title' → job title input\n"
+        "- Map 'job_title' → type the EXACT title. If 'job_title_contains' exists, type any title CONTAINING that substring.\n"
+        "- IMPORTANT: Credentials like 'user ' (with space) MUST be typed with the trailing space. Use type action with the exact string.\n"
         "\n"
         "MULTI-STEP TASKS:\n"
         "- For tasks requiring login THEN another action: first complete the full login, then do the secondary action\n"
@@ -2813,9 +3332,10 @@ def _llm_decide(
 
     creds_block = ""
     if all_creds:
-        creds_block = "TASK_CREDENTIALS (use EXACTLY as-is, no modifications):\n"
+        creds_block = "TASK_CREDENTIALS (use EXACTLY as-is, no modifications - including spaces):\n"
         for k, v in all_creds.items():
-            creds_block += f"  {k}: {v}\n"
+            # Show the value in quotes so trailing/leading spaces are visible
+            creds_block += f"  {k}: '{v}'\n"
 
     user_msg = (
         f"TASK: {task}\n"

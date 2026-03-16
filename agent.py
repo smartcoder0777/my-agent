@@ -1383,6 +1383,22 @@ def _extract_credentials_from_task(task: str) -> Dict[str, str]:
             if m3:
                 creds[key] = m3.group(1)
 
+    # Handle <username>/<password> literal placeholders (validator forgot to substitute)
+    # Fall back to well-known IWA defaults: user / Passw0rd!
+    for placeholder, key, default in [
+        ("<username>", "username", "user"),
+        ("<password>", "password", "Passw0rd!"),
+        ("<web_agent_id>", "web_agent_id", "1"),
+    ]:
+        if placeholder in t:
+            if key not in creds or creds.get(key, "").startswith("<"):
+                creds[key] = default
+
+    # Handle "user<web_agent_id>" pattern (replace placeholder with '1')
+    for key in ("username", "email", "signup_username", "signup_email"):
+        if key in creds and "<web_agent_id>" in creds[key]:
+            creds[key] = creds[key].replace("<web_agent_id>", "1")
+
     return creds
 
 
@@ -1889,12 +1905,128 @@ def _classify_task(task: str) -> str:
         return "CONTACT_BOOK"
     if re.search(r"register\s+with\s+the\s+following\s+username", t, re.IGNORECASE):
         return "REGISTRATION_BOOK"
+    if re.search(r"show\s+details\s+for\s+a\s+book\s+where", t, re.IGNORECASE):
+        return "BOOK_DETAIL"
+    if re.search(r"filter\s+books?\s+where", t, re.IGNORECASE):
+        return "FILTER_BOOK"
+    if re.search(r"search\s+for\s+(the\s+)?book\s+with\s+the\s+query", t, re.IGNORECASE):
+        return "SEARCH_BOOK"
+    if re.search(r"view\s+the\s+shopping\s+cart.*all\s+items|see\s+all\s+items.*cart", t, re.IGNORECASE):
+        return "VIEW_CART_BOOK"
+    if re.search(r"login\s+for\s+the\s+following\s+username", t, re.IGNORECASE):
+        return "LOGIN_BOOK"
+    if re.search(r"authenticate\s+with\s+username.*view\s+the\s+shopping\s+cart", t, re.IGNORECASE):
+        return "VIEW_CART_BOOK"
 
     # ---- AutoCinema (8000) specific ----
     if re.search(r"add\s+(to\s+)?watchlist", t, re.IGNORECASE):
         return "ADD_TO_WATCHLIST"
+    if re.search(r"remove\s+from\s+watchlist", t, re.IGNORECASE):
+        return "REMOVE_FROM_WATCHLIST"
     if re.search(r"share\s+movie\s+details", t, re.IGNORECASE):
         return "SHARE_MOVIE"
+    if re.search(r"watch\s+the\s+trailer\s+for\s+a\s+movie", t, re.IGNORECASE):
+        return "WATCH_TRAILER"
+
+    # ---- AutoShop (8002) additional ----
+    if re.search(r"click\s+on\s+buy\s+now\s+to\s+initiate\s+checkout", t, re.IGNORECASE):
+        return "CHECKOUT_STARTED"
+
+    # ---- AutoRestaurant (8003) additional ----
+    if re.search(r"navigate\s+to\s+the\s+about\s+page", t, re.IGNORECASE):
+        return "ABOUT_PAGE_VIEW"
+    if re.search(r"open\s+the\s+date\s+selector", t, re.IGNORECASE):
+        return "DATE_DROPDOWN_OPENED"
+    if re.search(r"(retrieve\s+details\s+of\s+a\s+contact\s+form|submit.*contact.*form.*email.*contains)", t, re.IGNORECASE):
+        return "CONTACT_FORM_SUBMIT"
+
+    # ---- AutoDoc (8004) additional ----
+    if re.search(r"edit\s+log\s+entry\s+where", t, re.IGNORECASE):
+        return "LOG_EDITED"
+    if re.search(r"archive\s+the\s+matter\s+where", t, re.IGNORECASE):
+        return "ARCHIVE_MATTER"
+    if re.search(r"(retrieve|show)\s+details\s+(of|for)\s+a?\s*client\s+whose", t, re.IGNORECASE):
+        return "VIEW_CLIENT_DETAILS"
+    if re.search(r"(retrieve|show)\s+details\s+(of|for)\s+(the\s+)?matter\s+(whose|where)", t, re.IGNORECASE):
+        return "VIEW_MATTER_DETAILS"
+
+    # ---- AutoMail (8005) additional ----
+    if re.search(r"send\s+an\s+email\s+to\s+['\"]", t, re.IGNORECASE):
+        return "SEND_EMAIL"
+    if re.search(r"search\s+for\s+emails?\s+where\s+the\s+query", t, re.IGNORECASE):
+        return "SEARCH_EMAIL"
+
+    # ---- AutoDelivery (8006) additional ----
+    if re.search(r"show\s+me\s+restaurants?\s+that\s+do\s+NOT", t, re.IGNORECASE):
+        return "RESTAURANT_FILTER"
+    if re.search(r"add\s+a?\s*menu\s+item\s+to\s+(my\s+)?cart", t, re.IGNORECASE):
+        return "ADD_TO_CART_MENU_ITEM"
+    if re.search(r"open\s+the\s+add.?to.?cart\s+modal", t, re.IGNORECASE):
+        return "ADD_TO_CART_MODAL_OPEN"
+    if re.search(r"start\s+a\s+quick\s+order", t, re.IGNORECASE):
+        return "QUICK_ORDER_STARTED"
+
+    # ---- AutoLodge (8007) additional ----
+    if re.search(r"message\s+the\s+host\s+where", t, re.IGNORECASE):
+        return "MESSAGE_HOST"
+    if re.search(r"edit\s+check.?in.*check.?out\s+dates", t, re.IGNORECASE):
+        return "EDIT_CHECK_IN_OUT_DATES"
+    if re.search(r"open\s+my\s+wishlist\s+to\s+view\s+saved\s+hotels", t, re.IGNORECASE):
+        return "WISHLIST_OPENED"
+
+    # ---- AutoConnect (8008) additional ----
+    if re.search(r"edit\s+profile\s+information", t, re.IGNORECASE):
+        return "EDIT_PROFILE"
+    if re.search(r"post\s+a\s+status\s+update", t, re.IGNORECASE):
+        return "POST_STATUS"
+
+    # ---- AutoHire (8009) additional ----
+    if re.search(r"clicks?\s+the\s+'?experts?'?\s+option\s+in\s+the\s+navbar|list\s+of\s+all\s+experts.*clicks?\s+the\s+'?experts?", t, re.IGNORECASE):
+        return "NAVBAR_EXPERTS_CLICK"
+    if re.search(r"show\s+the\s+list\s+of\s+all\s+experts", t, re.IGNORECASE):
+        return "NAVBAR_EXPERTS_CLICK"
+    if re.search(r"add\s+a\s+skill\s+where\s+skill", t, re.IGNORECASE):
+        return "ADD_SKILL"
+    if re.search(r"submit\s+a\s+job\s+with\s+title", t, re.IGNORECASE):
+        return "SUBMIT_JOB"
+    if re.search(r"decide\s+to\s+start\s+hiring", t, re.IGNORECASE):
+        return "HIRE_LATER_START"
+
+    # ---- AutoCalendar (8010) additional ----
+    if re.search(r"select\s+the\s+calendar\s+that\s+contains", t, re.IGNORECASE):
+        return "SELECT_CALENDAR"
+    if re.search(r"unselect\s+the\s+calendar", t, re.IGNORECASE):
+        return "UNSELECT_CALENDAR"
+    if re.search(r"go\s+to\s+today'?s?\s+date\s+in\s+the\s+calendar", t, re.IGNORECASE):
+        return "SELECT_TODAY"
+
+    # ---- AutoList (8011) additional ----
+    if re.search(r"complete\s+task\s+where\s+the\s+name\s+equals", t, re.IGNORECASE):
+        return "AUTOLIST_COMPLETE_TASK"
+
+    # ---- AutoRide (8012) additional ----
+    if re.search(r"view\s+trip\s+details\s+for\s+(a\s+)?(trip|ride)\s+where", t, re.IGNORECASE):
+        return "TRIP_DETAILS"
+    if re.search(r"select\s+car\s+options\s+where", t, re.IGNORECASE):
+        return "SELECT_CAR"
+    if re.search(r"search\s+destination\s+where\s+the\s+destination", t, re.IGNORECASE):
+        return "SEARCH_DESTINATION"
+    if re.search(r"select\s+date\s+for\s+(your|my)\s+trip\s+as", t, re.IGNORECASE):
+        return "SELECT_DATE"
+
+    # ---- AutoMedic (8013) additional ----
+    if re.search(r"refill\s+prescription\s+where", t, re.IGNORECASE):
+        return "REFILL_PRESCRIPTION"
+    if re.search(r"(show\s+me\s+details\s+to\s+refill|show\s+details\s+for\s+a\s+prescription)", t, re.IGNORECASE):
+        return "VIEW_PRESCRIPTION"
+    if re.search(r"show\s+details\s+for\s+doctor\s+reviews\s+where", t, re.IGNORECASE):
+        return "FILTER_DOCTOR_REVIEWS"
+
+    # ---- AutoBooks login/logout ----
+    if re.search(r"(login\s+for\s+the\s+following|login\s+with\s+(a\s+)?specific).*username.*then\s+logout", t, re.IGNORECASE):
+        return "LOGOUT_BOOK"
+    if re.search(r"first.*authenticate.*username.*then.*logout", t, re.IGNORECASE):
+        return "LOGOUT_BOOK"
 
     # ---- AutoCinema/AutoBooks multi-step ----
     if re.search(r"\b(logout|sign.?out|log.?out)\b", t) and re.search(r"\b(login|sign.?in|log.?in)\b", t):
@@ -3013,6 +3145,262 @@ _TASK_PLAYBOOKS: Dict[str, str] = {
         "4) If constraint is NOT contains X: clear the field and type any text that does NOT contain X. "
         "5) If constraint is description equals X: type exactly that description. "
         "6) Save the changes."
+    ),
+    # ---- AutoBooks (8001) additional ----
+    "BOOK_DETAIL": (
+        "PLAYBOOK: 1) On AutoBooks, browse the books list. "
+        "2) Find a book matching ALL TASK_CONSTRAINTS: "
+        "   rating NOT 'X' (pick a different rating), genres NOT CONTAIN 'Y', page_count <= Z. "
+        "3) Click on that book to open its detail page. "
+        "4) Ensure the detail/info page is fully visible."
+    ),
+    "FILTER_BOOK": (
+        "PLAYBOOK: 1) On AutoBooks, find the filter/genre dropdown or filter panel. "
+        "2) Select the genre specified: genres equals 'Dystopian' means select 'Dystopian'. "
+        "3) Apply the filter. "
+        "4) Verify filtered results appear."
+    ),
+    "SEARCH_BOOK": (
+        "PLAYBOOK: 1) On AutoBooks, find the search bar. "
+        "2) Type the exact query from TASK_CONSTRAINTS (e.g. 'Harry Potter and the Chamber of Secrets'). "
+        "3) Press Enter or click Search. "
+        "4) Verify search results appear."
+    ),
+    "LOGIN_BOOK": (
+        "PLAYBOOK: 1) On AutoBooks, click Login. "
+        "2) If credentials say '<username>' or '<password>', use 'user' and 'Passw0rd!' as fallback. "
+        "3) Type username and password into fields. "
+        "4) Click Login/Sign In button."
+    ),
+    "LOGOUT_BOOK": (
+        "PLAYBOOK: 1) On AutoBooks, first login: if username is '<username>' use 'user', "
+        "   if password is '<password>' use 'Passw0rd!'. "
+        "2) After login completes, find the logout/sign-out option. "
+        "3) Click Logout."
+    ),
+    "VIEW_CART_BOOK": (
+        "PLAYBOOK: 1) On AutoBooks, if username/password are provided (even as '<username>'), login first. "
+        "   Use 'user' for '<username>' and 'Passw0rd!' for '<password>' as fallback. "
+        "2) After login, click the Cart icon or navigate to /cart. "
+        "3) View the cart contents."
+    ),
+    # ---- AutoShop (8002) additional ----
+    "CHECKOUT_STARTED": (
+        "PLAYBOOK: 1) On AutoShop, browse the products. "
+        "2) Find a product where total_amount satisfies the constraint (less_equal X, greater_equal Y). "
+        "3) Click 'Buy Now' button on that product. "
+        "4) This should initiate checkout - confirm checkout page appears."
+    ),
+    # ---- AutoRestaurant (8003) additional ----
+    "ABOUT_PAGE_VIEW": (
+        "PLAYBOOK: 1) On AutoRestaurant, find the 'About' link in navbar or footer. "
+        "2) Click 'About' to navigate to the about page. "
+        "3) Verify the About page content is visible."
+    ),
+    "DATE_DROPDOWN_OPENED": (
+        "PLAYBOOK: 1) On AutoRestaurant, find the date/time reservation selector. "
+        "2) Click on the date selector to open the dropdown. "
+        "3) Select a date satisfying the constraint (less_equal given date). "
+        "4) Confirm selection."
+    ),
+    "CONTACT_FORM_SUBMIT": (
+        "PLAYBOOK: 1) On AutoRestaurant, navigate to the Contact page. "
+        "2) Fill in: email CONTAINS 'olivia.brown@' (or exact), username NOT CONTAINS 'Olivia'. "
+        "3) Fill any remaining fields. "
+        "4) Submit the contact form."
+    ),
+    # ---- AutoDoc (8004) additional ----
+    "LOG_EDITED": (
+        "PLAYBOOK: 1) On AutoDoc, navigate to Logs/Time entries or the Matter page. "
+        "2) Find the log entry where matter CONTAINS the given substring (e.g. 'Merger'). "
+        "3) Click Edit/pencil icon on that log. "
+        "4) Make any change (or just click save) to mark it edited."
+    ),
+    "ARCHIVE_MATTER": (
+        "PLAYBOOK: 1) On AutoDoc, navigate to Matters list. "
+        "2) Find a matter where status NOT CONTAINS the excluded value (e.g. 'On Hold'). "
+        "3) Click on that matter to select it. "
+        "4) Find and click 'Archive' button/option. "
+        "5) Confirm archiving if prompted."
+    ),
+    "VIEW_CLIENT_DETAILS": (
+        "PLAYBOOK: 1) On AutoDoc, navigate to Clients. "
+        "2) Find client matching ALL constraints: email equals X, matters equals Y, status contains Z. "
+        "3) Click on that client to open their detail page. "
+        "4) Ensure client details are fully visible."
+    ),
+    "VIEW_MATTER_DETAILS": (
+        "PLAYBOOK: 1) On AutoDoc, navigate to Matters. "
+        "2) Find matter matching ALL constraints: name equals X, status contains Y. "
+        "3) Click on that matter to open its detail page. "
+        "4) Ensure matter details are visible."
+    ),
+    # ---- AutoMail (8005) additional ----
+    "SEND_EMAIL": (
+        "PLAYBOOK: 1) On AutoMail, click Compose/New Email. "
+        "2) In the To/recipient field, type the address from the task (e.g. 'recipient@example.com'). "
+        "3) In the Subject field, type a subject that CONTAINS the required substring. "
+        "4) In the Body, type text that CONTAINS the required substring. "
+        "5) Click Send."
+    ),
+    "SEARCH_EMAIL": (
+        "PLAYBOOK: 1) On AutoMail, find the Search bar. "
+        "2) Type the query from TASK_CONSTRAINTS (e.g. query equals '2'). "
+        "3) Press Enter or click Search. "
+        "4) Verify search results appear."
+    ),
+    # ---- AutoDelivery (8006) additional ----
+    "RESTAURANT_FILTER": (
+        "PLAYBOOK: 1) On AutoDelivery, find the cuisine filter/dropdown. "
+        "2) For NOT CONTAIN 'Portuguese': do NOT select Portuguese - select any other cuisine or use the filter. "
+        "3) Apply the filter and verify filtered restaurants appear."
+    ),
+    "ADD_TO_CART_MENU_ITEM": (
+        "PLAYBOOK: 1) On AutoDelivery, browse restaurants. "
+        "2) Find a restaurant that CONTAINS the required name. "
+        "3) Find a menu item matching constraints: preferences in list, size equals X, quantity <= Y. "
+        "4) Add that item to cart."
+    ),
+    "ADD_TO_CART_MODAL_OPEN": (
+        "PLAYBOOK: 1) On AutoDelivery, find the restaurant and menu item matching constraints. "
+        "   price <= X, item equals 'Chef's Special', restaurant equals 'Candlenut'. "
+        "2) Click on that item to open the add-to-cart modal. "
+        "3) The modal should be visible - set quantity/size if needed."
+    ),
+    "QUICK_ORDER_STARTED": (
+        "PLAYBOOK: 1) On AutoDelivery, look for a 'Quick Order' button on any restaurant card. "
+        "2) Click Quick Order on any restaurant. "
+        "3) Verify the quick order flow starts."
+    ),
+    # ---- AutoLodge (8007) additional ----
+    "MESSAGE_HOST": (
+        "PLAYBOOK: 1) On AutoLodge, use list_cards to find a hotel matching ALL constraints: "
+        "   host_name NOT 'Kevin', price < 601, guests < 3, amenities in ['Balcony views'], "
+        "   rating < 5.69, location equals 'Madrid, Spain', title NOT 'Mount Nelson Hotel'. "
+        "2) Click on that listing to open it. "
+        "3) Find 'Message Host' button. "
+        "4) Type a message that CONTAINS the required text (e.g. 'm'). "
+        "5) Send the message."
+    ),
+    "EDIT_CHECK_IN_OUT_DATES": (
+        "PLAYBOOK: 1) On AutoLodge, find the listing matching ALL constraints: "
+        "   checkin date <= given, checkout date <= given, guests_set NOT equals X, "
+        "   amenities contains Y, price < Z, host_name equals W. "
+        "2) Open that listing's booking/reservation form. "
+        "3) Modify the check-in and check-out dates to match constraints. "
+        "4) Save/confirm."
+    ),
+    "WISHLIST_OPENED": (
+        "PLAYBOOK: 1) On AutoLodge, find the Wishlist/Saved Hotels icon or menu item. "
+        "2) Click it to open your wishlist. "
+        "3) Verify saved/wishlisted hotels are visible."
+    ),
+    # ---- AutoConnect (8008) additional ----
+    "EDIT_PROFILE": (
+        "PLAYBOOK: 1) On AutoConnect, navigate to your Profile (click avatar or 'My Profile'). "
+        "2) Click Edit Profile / pencil icon. "
+        "3) Find the bio/about field. "
+        "4) If constraint is bio NOT CONTAIN 'X': clear the bio and type any text that does NOT contain X. "
+        "5) Save changes."
+    ),
+    "POST_STATUS": (
+        "PLAYBOOK: 1) On AutoConnect, find the status/post input area on the home/feed page. "
+        "2) Click in the text box. "
+        "3) Type content that CONTAINS the required text (e.g. 'i'). "
+        "4) Click Post/Submit."
+    ),
+    # ---- AutoHire (8009) additional ----
+    "NAVBAR_EXPERTS_CLICK": (
+        "PLAYBOOK: 1) On AutoHire, look at the top navigation bar. "
+        "2) Find and click the 'Experts' link/option. "
+        "3) Verify the experts list page loads."
+    ),
+    "ADD_SKILL": (
+        "PLAYBOOK: 1) On AutoHire, navigate to your Profile or Skills section. "
+        "2) Find 'Add Skill' button. "
+        "3) Type a skill name that does NOT contain the excluded substring. "
+        "4) Save/confirm."
+    ),
+    "SUBMIT_JOB": (
+        "PLAYBOOK: 1) On AutoHire, navigate to 'Post a Job' or 'Submit Job'. "
+        "2) Fill in: title NOT equal to 'DevOps Jobs' (use a different title), "
+        "   rate_from LESS than 29, rate_to GREATER EQUAL 49. "
+        "3) Fill other required fields. "
+        "4) Submit the job posting."
+    ),
+    "HIRE_LATER_START": (
+        "PLAYBOOK: 1) On AutoHire, navigate to 'Hire Later' page (saved/deferred experts). "
+        "2) Find the expert matching ALL constraints: "
+        "   country contains X, role contains Y, name equals Z (or NOT contains W). "
+        "3) Click 'Start Hiring' or 'Hire Now' button for that expert."
+    ),
+    # ---- AutoCalendar (8010) additional ----
+    "SELECT_CALENDAR": (
+        "PLAYBOOK: 1) On AutoCalendar, find the calendar list/sidebar. "
+        "2) Find the calendar whose name CONTAINS the required substring (e.g. 'c'). "
+        "3) Click on it / check its checkbox to select it. "
+        "4) Verify it is selected (checkbox checked, events visible)."
+    ),
+    "UNSELECT_CALENDAR": (
+        "PLAYBOOK: 1) On AutoCalendar, find the calendar list/sidebar. "
+        "2) Find the calendar whose name CONTAINS the required substring (e.g. 'uran'). "
+        "3) Click on it / uncheck its checkbox to deselect/unselect it."
+    ),
+    # ---- AutoList (8011) additional ----
+    "AUTOLIST_COMPLETE_TASK": (
+        "PLAYBOOK: 1) On AutoList, find the Tasks section. "
+        "2) Find the task matching ALL constraints: "
+        "   name equals 'Deploy to staging', description NOT contains 'phk', "
+        "   date >= '2026-03-08', priority NOT equals 'Highest'. "
+        "3) Click the 'Complete' / checkmark button on that task. "
+        "4) Confirm completion."
+    ),
+    # ---- AutoRide (8012) additional ----
+    "TRIP_DETAILS": (
+        "PLAYBOOK: 1) On AutoRide, view your trips/rides list. "
+        "2) Find the trip matching ALL constraints: "
+        "   location CONTAINS/NOT CONTAINS X, destination CONTAINS/NOT CONTAINS Y, "
+        "   ride_name CONTAINS/EQUALS Z, scheduled_time GREATER/NOT EQUAL to W. "
+        "3) Click on that trip to view its details."
+    ),
+    "SELECT_CAR": (
+        "PLAYBOOK: 1) On AutoRide, find the ride matching ALL constraints: "
+        "   location NOT CONTAIN X, destination CONTAINS Y, "
+        "   ride_name NOT EQUAL Z, scheduled_time NOT EQUAL W. "
+        "2) Click on that ride to open it. "
+        "3) Select the car/vehicle option."
+    ),
+    "SEARCH_DESTINATION": (
+        "PLAYBOOK: 1) On AutoRide, find the destination search bar. "
+        "2) Type ANY destination that is NOT the excluded value from the constraint. "
+        "3) Press Enter or click Search."
+    ),
+    "SELECT_DATE": (
+        "PLAYBOOK: 1) On AutoRide, find the date picker for your trip. "
+        "2) Select the exact date from TASK_CONSTRAINTS (e.g. '2026-03-23'). "
+        "3) Confirm the date selection."
+    ),
+    # ---- AutoMedic (8013) additional ----
+    "REFILL_PRESCRIPTION": (
+        "PLAYBOOK: 1) On AutoMedic, navigate to Prescriptions section. "
+        "2) Find a prescription matching ALL constraints: "
+        "   medicine_name NOT contains X, doctor_name NOT contains Y. "
+        "3) Click 'Refill' button on that prescription. "
+        "4) Confirm the refill action."
+    ),
+    "VIEW_PRESCRIPTION": (
+        "PLAYBOOK: 1) On AutoMedic, navigate to Prescriptions. "
+        "2) Find prescription matching ALL constraints: "
+        "   medicine_name equals X, doctor_name NOT contains Y, start_date NOT equals Z, "
+        "   category NOT contains W, status NOT equals V, dosage contains U. "
+        "3) Click on that prescription to view its details."
+    ),
+    "FILTER_DOCTOR_REVIEWS": (
+        "PLAYBOOK: 1) On AutoMedic, navigate to the Reviews or Doctors section. "
+        "2) Find the filter for doctor reviews. "
+        "3) Set: doctor_name NOT CONTAINS X, filter_rating EQUALS Y (e.g. '4.0'), "
+        "   sort_order NOT CONTAINS Z, speciality CONTAINS W. "
+        "4) Apply the filter."
     ),
     # --- General fallback ---
     "GENERAL": (

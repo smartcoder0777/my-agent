@@ -1295,42 +1295,237 @@ def _run_tool(tool: str, args: Dict[str, Any], *, html: str, url: str, candidate
 # ---------------------------------------------------------------------------
 
 def _extract_credentials_from_task(task: str) -> Dict[str, str]:
-    """Parse credential values literally embedded in the task prompt.
+    """Parse credential and required-field values literally embedded in the task prompt.
 
     IWA replaces <USERNAME>/<PASSWORD> placeholders in the task *before* sending
     to the agent, so the prompt contains real values like:
       'Login where username equals john123 and password equals p@ss!'
     We extract them so the LLM sees them in a structured block.
+    Only extracts EXACT (equals) values, not NOT/not-equals constraints.
     """
     creds: Dict[str, str] = {}
     t = task or ""
 
-    patterns = [
-        # "username equals X" / "username: X" (up to next comma, 'and', 'or', end)
-        (r"(?:user[- _]?name|user)\s*(?:equals|:|is|=)\s*['\"]?([^\s,'\"\n]+)['\"]?", "username"),
-        (r"(?:email)\s*(?:equals|:|is|=)\s*['\"]?([^\s,'\"\n]+)['\"]?", "email"),
-        (r"(?:password|pass)\s*(?:equals|:|is|=)\s*['\"]?([^\s,'\"\n]+)['\"]?", "password"),
-        # signup variants
-        (r"signup[_-]?username\s*(?:equals|:|is|=)\s*['\"]?([^\s,'\"\n]+)['\"]?", "signup_username"),
-        (r"signup[_-]?email\s*(?:equals|:|is|=)\s*['\"]?([^\s,'\"\n]+)['\"]?", "signup_email"),
-        (r"signup[_-]?password\s*(?:equals|:|is|=)\s*['\"]?([^\s,'\"\n]+)['\"]?", "signup_password"),
-    ]
-
-    for pat, key in patterns:
-        m = re.search(pat, t, re.IGNORECASE)
+    # Helper to extract a field that uses the "equals" operator (not "not equals")
+    def _grab_equals(field_pat: str, key: str) -> None:
+        # Match "field [not] equals value" - skip if preceded by "not"
+        m = re.search(
+            r"(?<!\bnot\s)(?<!\bNOT\s)" + field_pat + r"\s+(?:equals?|:|is)\s+['\"]?([^\s,'\"\n\]]+)['\"]?",
+            t, re.IGNORECASE
+        )
         if m:
             val = m.group(1).strip().rstrip(".,;:")
-            if val and val not in creds.values():
+            if val and key not in creds:
                 creds[key] = val
 
+    patterns = [
+        # Credentials
+        (r"(?:user[- _]?name|user)", "username"),
+        (r"(?:email)", "email"),
+        (r"(?:password|pass)", "password"),
+        (r"signup[_-]?username", "signup_username"),
+        (r"signup[_-]?email", "signup_email"),
+        (r"signup[_-]?password", "signup_password"),
+        # Payment fields
+        (r"cvv", "cvv"),
+        (r"(?:zipcode|zip)", "zipcode"),
+        (r"country", "country"),
+        # Task/form fields
+        (r"priority", "priority"),
+        (r"guests?(?:_set)?", "guests"),
+        (r"rating", "rating"),
+        (r"reviews?", "reviews"),
+    ]
+
+    for field_pat, key in patterns:
+        # Check it's a proper equals (not "not equals")
+        m = re.search(
+            r"(?<!\w)" + field_pat + r"\s+equals?\s+['\"]?([^\s,'\"\n\]]+)['\"]?",
+            t, re.IGNORECASE
+        )
+        if m:
+            # Verify not preceded by "not"
+            prefix = t[max(0, m.start()-5):m.start()].lower()
+            if "not" not in prefix:
+                val = m.group(1).strip().rstrip(".,;:")
+                if val and key not in creds:
+                    creds[key] = val
+
+    # Special: "writing a title of job for 'X'"
+    m = re.search(r"writing\s+a\s+title\s+of\s+job\s+for\s+['\"]([^'\"]+)['\"]", t, re.IGNORECASE)
+    if m:
+        creds["job_title"] = m.group(1).strip()
+
     return creds
+
+
+def _parse_task_constraints(task: str) -> List[Dict[str, Any]]:
+    """Parse ALL field/operator/value constraints from an IWA task prompt.
+
+    Handles operators: equals, not_equals, contains, not_contains,
+    greater_than, less_than, not_in, in.
+    Returns list of dicts: {field, op, value}
+    """
+    constraints: List[Dict[str, Any]] = []
+    t = task or ""
+
+    # --- "is not one of [...]" ---
+    not_in_pat = re.compile(
+        r"([\w_]+(?:\s+[\w_]+)?)\s+is\s+not\s+one\s+of\s+\[([^\]]+)\]",
+        re.IGNORECASE
+    )
+    skip_spans: List[tuple] = []
+    for m in not_in_pat.finditer(t):
+        field = m.group(1).strip().lower().replace(" ", "_")
+        vals = [v.strip().strip("'\"") for v in m.group(2).split(",")]
+        constraints.append({"field": field, "op": "not_in", "value": vals})
+        skip_spans.append((m.start(), m.end()))
+
+    # --- "is one of [...]" ---
+    in_pat = re.compile(
+        r"([\w_]+(?:\s+[\w_]+)?)\s+is\s+one\s+of\s+\[([^\]]+)\]",
+        re.IGNORECASE
+    )
+    for m in in_pat.finditer(t):
+        field = m.group(1).strip().lower().replace(" ", "_")
+        vals = [v.strip().strip("'\"") for v in m.group(2).split(",")]
+        constraints.append({"field": field, "op": "in", "value": vals})
+        skip_spans.append((m.start(), m.end()))
+
+    def _in_skip(start: int, end: int) -> bool:
+        return any(start >= s and end <= e for s, e in skip_spans)
+
+    # --- basic operators (ordered: more specific first) ---
+    # Patterns capture a single clean word (or word_word) as field name.
+    # Also handle IWA's verbose form "subject that CONTAINS 'X'" and
+    # "email address that does NOT CONTAIN 'Y'"
+    _FLD = r"([\w]+(?:_[\w]+)*)"  # one or more snake_case words (no spaces)
+
+    basic: List[tuple] = [
+        # IWA verbose: "field that does NOT CONTAIN 'value'"
+        (_FLD + r"(?:\s+that)?\s+does\s+NOT\s+CONTAIN\s+['\"]([^'\"]+)['\"]", "not_contains"),
+        (_FLD + r"(?:\s+that)?\s+does\s+NOT\s+CONTAIN\s+([^\s,'\"\n]+)", "not_contains"),
+        # "field not contains 'value'"
+        (_FLD + r"\s+not\s+contains?\s+['\"]([^'\"]+)['\"]", "not_contains"),
+        (_FLD + r"\s+not\s+contains?\s+([^\s,'\"\n]+)", "not_contains"),
+        # "field not equals 'value'"
+        (_FLD + r"\s+not\s+equals?\s+['\"]([^'\"]+)['\"]", "not_equals"),
+        (_FLD + r"\s+not\s+equals?\s+([^\s,'\"\n]+)", "not_equals"),
+        # IWA verbose: "field that CONTAINS 'value'"
+        (_FLD + r"(?:\s+that)?\s+CONTAINS\s+['\"]([^'\"]+)['\"]", "contains"),
+        # "field contains 'value'"
+        (_FLD + r"\s+contains?\s+['\"]([^'\"]+)['\"]", "contains"),
+        (_FLD + r"\s+contains?\s+([^\s,'\"\n]+)", "contains"),
+        # "field equals 'value'"
+        (_FLD + r"\s+equals?\s+['\"]([^'\"]+)['\"]", "equals"),
+        (_FLD + r"\s+EQUALS\s+['\"]([^'\"]+)['\"]", "equals"),
+        (_FLD + r"\s+equals?\s+([^\s,'\"\n\]]+)", "equals"),
+        # greater/less than
+        (_FLD + r"\s+greater\s+than\s+['\"]?([^\s,'\"\n\]]+)['\"]?", "greater_than"),
+        (_FLD + r"\s+less\s+than\s+['\"]?([^\s,'\"\n\]]+)['\"]?", "less_than"),
+    ]
+
+    seen: set = set()
+    for pat, op in basic:
+        for m in re.finditer(pat, t, re.IGNORECASE):
+            if _in_skip(m.start(), m.end()):
+                continue
+            field = m.group(1).strip().lower().replace(" ", "_")
+            value = m.group(2).strip().strip("'\"").rstrip(".,;:")
+            key = (field, op, value)
+            if key not in seen:
+                seen.add(key)
+                constraints.append({"field": field, "op": op, "value": value})
+
+    # Special: "value that is NOT 'X'" (destination-style)
+    m2 = re.search(r"(\w+)\s+value\s+that\s+is\s+NOT\s+['\"]([^'\"]+)['\"]", t, re.IGNORECASE)
+    if m2:
+        field = m2.group(1).strip().lower()
+        val = m2.group(2)
+        key2 = (field, "not_equals", val)
+        if key2 not in seen:
+            seen.add(key2)
+            constraints.append({"field": field, "op": "not_equals", "value": val})
+
+    return constraints
+
+
+def _format_constraints_block(constraints: List[Dict[str, Any]]) -> str:
+    """Format parsed constraints for LLM context."""
+    if not constraints:
+        return ""
+    lines = ["TASK_CONSTRAINTS (use these to find the RIGHT item and fill forms correctly):"]
+    for c in constraints:
+        field = c["field"]
+        op = c["op"]
+        value = c["value"]
+        if op == "equals":
+            lines.append(f"  [{field}] MUST EQUAL '{value}' exactly -> type/select this exact value")
+        elif op == "not_equals":
+            lines.append(f"  [{field}] must NOT be '{value}' -> choose any other valid value")
+        elif op == "contains":
+            lines.append(f"  [{field}] MUST CONTAIN the substring '{value}'")
+        elif op == "not_contains":
+            lines.append(f"  [{field}] must NOT contain '{value}'")
+        elif op == "greater_than":
+            lines.append(f"  [{field}] must be > {value} (numeric)")
+        elif op == "less_than":
+            lines.append(f"  [{field}] must be < {value} (numeric or date)")
+        elif op == "not_in":
+            lines.append(f"  [{field}] must NOT be any of {value}")
+        elif op == "in":
+            lines.append(f"  [{field}] must be one of {value}")
+    return "\n".join(lines)
 
 
 def _classify_task(task: str) -> str:
     """Return a short label for the task type to prime the LLM."""
     t = (task or "").lower()
 
-    # Multi-step tasks first (order matters)
+    # --- IWA-specific tasks (check first, most specific) ---
+    # Destination input
+    if re.search(r"destination\s+value\s+that\s+is\s+NOT", t, re.IGNORECASE):
+        return "ENTER_DESTINATION"
+    if re.search(r"enter\s+destination", t, re.IGNORECASE):
+        return "ENTER_DESTINATION"
+
+    # Email actions
+    if re.search(r"mark\s+as\s+spam", t, re.IGNORECASE):
+        return "EMAIL_MARK_SPAM"
+    if re.search(r"(mark|move)\s+.*(spam|junk)", t, re.IGNORECASE):
+        return "EMAIL_MARK_SPAM"
+    if re.search(r"(delete|remove)\s+.*(email|mail|message)", t, re.IGNORECASE):
+        return "EMAIL_DELETE"
+    if re.search(r"(open|read|view)\s+.*(email|mail|message)", t, re.IGNORECASE):
+        return "EMAIL_OPEN"
+    if re.search(r"(reply|forward|compose|send)\s+.*(email|mail|message)", t, re.IGNORECASE):
+        return "EMAIL_COMPOSE"
+
+    # Task management (AutoList / AutoWork tasks)
+    if re.search(r"delete\s+task\b", t, re.IGNORECASE):
+        return "DELETE_TASK"
+    if re.search(r"(create|add|new)\s+task\b", t, re.IGNORECASE):
+        return "CREATE_TASK"
+    if re.search(r"(edit|update|modify)\s+task\b", t, re.IGNORECASE):
+        return "EDIT_TASK"
+    if re.search(r"(complete|finish|close)\s+task\b", t, re.IGNORECASE):
+        return "COMPLETE_TASK"
+
+    # Booking / lodging (AutoLodge)
+    if re.search(r"confirm\s+the\s+booking", t, re.IGNORECASE):
+        return "BOOKING_CONFIRM"
+    if re.search(r"(book|reserve)\s+.*(stay|room|hotel|lodg)", t, re.IGNORECASE):
+        return "BOOKING_CONFIRM"
+
+    # Job posting (AutoWork / AutoConnect)
+    if re.search(r"job\s+posting", t, re.IGNORECASE) and re.search(r"(writing|write|title)", t, re.IGNORECASE):
+        return "JOB_POSTING"
+    if re.search(r"(initiate|start)\s+.*(job|posting)", t, re.IGNORECASE):
+        return "JOB_POSTING"
+    if re.search(r"post\s+a\s+job", t, re.IGNORECASE):
+        return "JOB_POSTING"
+
+    # Multi-step tasks (order matters)
     if re.search(r"\b(logout|sign.?out|log.?out)\b", t) and re.search(r"\b(login|sign.?in|log.?in)\b", t):
         return "LOGIN_THEN_LOGOUT"
     if re.search(r"\b(add|remove|delete).*(watchlist|reading.?list|wishlist|cart)\b", t) and re.search(r"\b(login|sign.?in)\b", t):
@@ -1507,9 +1702,93 @@ _TASK_PLAYBOOKS: Dict[str, str] = {
         "PLAYBOOK: 1) Navigate to the item detail page. "
         "2) Find the watchlist/reading-list button. 3) Click add or remove."
     ),
+    # --- IWA-specific task types ---
+    "ENTER_DESTINATION": (
+        "PLAYBOOK: 1) Find the destination input field on the page (look for 'destination', 'to', 'where', "
+        "or address-style input). "
+        "2) Click it to focus. "
+        "3) Clear the field if it has a pre-filled value. "
+        "4) Type any valid destination address (e.g. '123 Main Street, New York, NY 10001') that is "
+        "DIFFERENT from the forbidden value in TASK_CONSTRAINTS (the NOT constraint). "
+        "5) Confirm or submit the destination."
+    ),
+    "EMAIL_MARK_SPAM": (
+        "PLAYBOOK: 1) You are on an email/webmail interface. "
+        "2) Use list_cards or search_text to find the email matching ALL constraints: "
+        "check the subject (contains/not-contains) AND sender address (contains/not-contains). "
+        "3) Click on that specific email to open it. "
+        "4) Find the 'Spam', 'Mark as Spam', 'Report Spam', or 'Junk' button/option "
+        "(often in a toolbar, kebab menu, or right-click context menu). "
+        "5) Click it to mark the email as spam."
+    ),
+    "EMAIL_DELETE": (
+        "PLAYBOOK: 1) Find the email matching all subject/sender constraints. "
+        "2) Click it to select or open it. "
+        "3) Find and click the Delete/Trash button."
+    ),
+    "EMAIL_OPEN": (
+        "PLAYBOOK: 1) Find the email matching all constraints. "
+        "2) Click on it to open and read it."
+    ),
+    "EMAIL_COMPOSE": (
+        "PLAYBOOK: 1) Click Compose/New Message/Reply/Forward. "
+        "2) Fill in To, Subject, Body fields with EXACT values from task. "
+        "3) Send."
+    ),
+    "DELETE_TASK": (
+        "PLAYBOOK: 1) Navigate to the task/todo list page. "
+        "2) Use list_cards tool to see all tasks with their fields (name, description, date, priority). "
+        "3) Find the task matching ALL TASK_CONSTRAINTS: "
+        "   - name NOT contains the excluded string "
+        "   - description contains the required substring "
+        "   - date less than the given date "
+        "   - priority equals the given value. "
+        "4) Click that task's Delete/Remove/Trash button. "
+        "5) Confirm deletion if a dialog appears."
+    ),
+    "CREATE_TASK": (
+        "PLAYBOOK: 1) Find the 'New Task', 'Add Task', or '+' button. "
+        "2) Fill in name, description, date, priority fields with EXACT values from task. "
+        "3) Save/Submit."
+    ),
+    "EDIT_TASK": (
+        "PLAYBOOK: 1) Find the task matching the constraints. "
+        "2) Click Edit/Pencil icon. "
+        "3) Update the specified fields with EXACT values. "
+        "4) Save."
+    ),
+    "COMPLETE_TASK": (
+        "PLAYBOOK: 1) Find the task matching the constraints. "
+        "2) Click the Complete/Done/Checkmark button on it."
+    ),
+    "BOOKING_CONFIRM": (
+        "PLAYBOOK: 1) You are on a lodging/accommodation booking site. "
+        "2) Use list_cards to browse listings. Find the one matching ALL TASK_CONSTRAINTS: "
+        "   - rating equals (exact), price greater_than, location contains, "
+        "   - host_name contains, reviews equals, amenities NOT in list, "
+        "   - title NOT equals, guests_set equals. "
+        "3) Set guests count to the required value (guests_set constraint). "
+        "4) Click 'Book Now', 'Reserve', or 'Confirm' on that listing. "
+        "5) Fill the payment form: "
+        "   - For fields with 'equals' constraint: type EXACTLY that value "
+        "   - For fields with 'not equals' constraint: enter any valid alternative "
+        "     (e.g. card_number not_equals X -> use '4111111111111111'; "
+        "      expiration not_equals Y -> use '12/27'). "
+        "   - cvv, zipcode, country: use EXACT values from TASK_CONSTRAINTS. "
+        "6) Submit/Confirm the booking."
+    ),
+    "JOB_POSTING": (
+        "PLAYBOOK: 1) Look for a 'Post a Job', 'Create Job', 'Add Job', or '+' button/link. "
+        "2) Click it to open the job posting form/page. "
+        "3) Find the job title field. "
+        "4) Type the EXACT job title from TASK_CREDENTIALS['job_title'] or the task text. "
+        "5) Submit/post the job if required."
+    ),
+    # --- General fallback ---
     "GENERAL": (
         "PLAYBOOK: Analyze the task carefully, identify the key action required, "
-        "and execute the most direct path to complete it."
+        "and execute the most direct path to complete it. "
+        "Use TASK_CONSTRAINTS to find the correct item and fill forms."
     ),
 }
 
@@ -1535,6 +1814,10 @@ def _llm_decide(
     task_type = _classify_task(task)
     playbook = _TASK_PLAYBOOKS.get(task_type, _TASK_PLAYBOOKS["GENERAL"])
 
+    # Parse ALL constraints from the task
+    task_constraints = _parse_task_constraints(task)
+    constraints_block = _format_constraints_block(task_constraints)
+
     # Extract credentials from both task text and relevant_data
     creds_from_task = _extract_credentials_from_task(task)
     creds_from_data: Dict[str, str] = {}
@@ -1542,6 +1825,12 @@ def _llm_decide(
         for k, v in relevant_data.items():
             if isinstance(v, str) and v:
                 creds_from_data[str(k)] = str(v)
+    # Also add all "equals" constraints as directly usable field values
+    for c in task_constraints:
+        if c["op"] == "equals" and isinstance(c["value"], str):
+            field = c["field"]
+            if field not in creds_from_task and field not in creds_from_data:
+                creds_from_task[field] = c["value"]
     all_creds = {**creds_from_task, **creds_from_data}
 
     system_msg = (
@@ -1557,16 +1846,38 @@ def _llm_decide(
         "- Use done ONLY when the task is clearly and fully completed\n"
         "\n"
         "STRICT VALUE COPYING (CRITICAL):\n"
-        "- Copy ALL values EXACTLY as provided in TASK_CREDENTIALS or the task text\n"
+        "- Copy ALL values EXACTLY as provided in TASK_CREDENTIALS or TASK_CONSTRAINTS 'equals' fields\n"
         "- Do NOT correct typos, do NOT remove numbers, do NOT truncate strings\n"
         "- Example: if task says 'Sofia 4', type 'Sofia 4' not 'Sofia'\n"
-        "- Example: if task says 'ng', type 'ng' not 'anything'\n"
+        "\n"
+        "CONSTRAINT HANDLING:\n"
+        "- TASK_CONSTRAINTS lists ALL field constraints for this task\n"
+        "- 'equals' → type/select EXACTLY that value\n"
+        "- 'not_equals' → choose ANY valid value DIFFERENT from the listed one\n"
+        "  (e.g. card_number not '5500000000000004' → use '4111111111111111')\n"
+        "  (e.g. expiration not '06/26' → use '12/27')\n"
+        "  (e.g. destination not 'Business Tower...' → type any other real address)\n"
+        "- 'contains' → the item's field value must include that substring (use to identify the item)\n"
+        "- 'not_contains' → the item's field value must NOT include that substring\n"
+        "- 'greater_than'/'less_than' → numeric or date comparison (use to identify/filter items)\n"
+        "- 'not_in' → the item's field must NOT be any of the listed values\n"
+        "\n"
+        "FINDING THE RIGHT ITEM:\n"
+        "- When a task has multiple constraints, use list_cards or search_text to browse items\n"
+        "- Check ALL constraints against each candidate item before selecting it\n"
+        "- For email tasks: match subject AND sender constraints simultaneously\n"
+        "- For task management: match name, description, date, AND priority constraints\n"
+        "- For booking: match rating, price, location, host, reviews, amenities, title constraints\n"
         "\n"
         "CREDENTIAL HANDLING:\n"
-        "- If TASK_CREDENTIALS is shown, use those exact values when typing into username/email/password fields\n"
-        "- Map 'username'/'signup_username' → username input field\n"
-        "- Map 'email'/'signup_email' → email input field\n"
-        "- Map 'password'/'signup_password' → password input field\n"
+        "- TASK_CREDENTIALS contains extracted field values (credentials + form fields)\n"
+        "- Map 'username'/'signup_username' → username input\n"
+        "- Map 'email'/'signup_email' → email input\n"
+        "- Map 'password'/'signup_password' → password input\n"
+        "- Map 'cvv' → CVV/security code input\n"
+        "- Map 'zipcode' → ZIP/postal code input\n"
+        "- Map 'country' → country selector/input\n"
+        "- Map 'job_title' → job title input\n"
         "\n"
         "MULTI-STEP TASKS:\n"
         "- For tasks requiring login THEN another action: first complete the full login, then do the secondary action\n"
@@ -1628,6 +1939,7 @@ def _llm_decide(
         f"STEP: {int(step_index)}\n"
         f"URL: {url}\n\n"
         + (creds_block + "\n" if creds_block else "")
+        + (constraints_block + "\n\n" if constraints_block else "")
         + f"{playbook}\n\n"
         + f"CURRENT STATE (TEXT SUMMARY):\n{page_summary}\n\n"
         + (f"DOM DIGEST (STRUCTURED):\n{dom_digest}\n\n" if dom_digest else "")
@@ -1644,7 +1956,7 @@ def _llm_decide(
 
     model = os.getenv("OPENAI_MODEL", "gpt-4o")
     temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.2"))
-    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "500"))
+    max_tokens = int(os.getenv("OPENAI_MAX_TOKENS", "600"))
 
     usages: List[Dict[str, Any]] = []
     tool_calls = 0

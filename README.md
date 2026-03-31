@@ -43,3 +43,33 @@ uvicorn main:app --host 0.0.0.0 --port 5000
 - `navigate` - `{"type": "navigate", "url": "https://..."}`
 - `click` - `{"type": "click", "selector": "#submit-btn"}`
 - `input` - `{"type": "input", "selector": "#email", "value": "text"}`
+
+## Local evaluation (`eval_github`)
+
+The subnet repo (`autoppia_web_agents_subnet`) runs `python -m scripts.miner.eval_github --github ...` against your agent. Before that, the **IWA demo backend** must be listening on **port 8090** (task generation and DB reset).
+
+1. Clone the demo webs repo alongside the subnet repo (default path expected by the deploy script):
+   ```bash
+   cd ~/work
+   git clone https://github.com/autoppia/autoppia_webs_demo.git
+   ```
+2. From `autoppia_web_agents_subnet`, run the deploy script (or set `WEBS_DEMO_PATH` to your clone):
+   ```bash
+   ./scripts/validator/demo-webs/deploy_demo_webs.sh
+   ```
+3. Confirm the API is up:
+   ```bash
+   curl -sSf http://localhost:8090/health
+   ```
+4. Install **Playwright** browsers and host deps on Linux (`playwright install`, `sudo playwright install-deps` if prompted).
+5. Run the miner eval from the subnet repo root with your API keys in an env file:
+   ```bash
+   python -m scripts.miner.eval_github \
+     --env-file /path/to/.env \
+     --github "https://github.com/YOUR_USER/YOUR_REPO/commit/YOUR_SHA" \
+     --tasks 1
+   ```
+
+Install `autoppia_iwa` exactly as the subnet repo documents (same commit/venv as validators) so task generation does not hit dependency-injector / LLM wiring errors.
+
+**URL handling:** Demo apps use non-default ports (e.g. `http://localhost:8013/?seed=...`). This agent resolves navigation URLs against the current page and **realigns** `http://localhost/...` (implicit port 80) to the same host/port as the task URL so the browser does not open the wrong origin.

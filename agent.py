@@ -904,6 +904,41 @@ def _resolve_url(url: str, base_url: str) -> str:
         return str(url or "").strip()
 
 
+def _reconcile_nav_origin_with_base(resolved: str, base: str) -> str:
+    """Keep scheme/host/port consistent with the current page.
+
+    If the model returns a full URL like ``http://localhost/doctors`` (implicit :80) while the
+    task runs on ``http://localhost:8013/``, :func:`urllib.parse.urljoin` leaves the wrong
+    origin. When hostnames match and the resolved URL has no explicit port, copy ``netloc``
+    from *base* (validator-provided page URL).
+    """
+    try:
+        from urllib.parse import urlparse, urlunparse
+
+        r = urlparse((resolved or "").strip())
+        b = urlparse((base or "").strip())
+        if not b.netloc or not r.netloc:
+            return (resolved or "").strip()
+        if (r.scheme or "").lower() != (b.scheme or "").lower():
+            return (resolved or "").strip()
+        rh = (r.hostname or "").lower()
+        bh = (b.hostname or "").lower()
+        if not rh or not bh or rh != bh:
+            return (resolved or "").strip()
+        if r.netloc == b.netloc:
+            return (resolved or "").strip()
+        # Model chose a different explicit port than base — keep it.
+        if r.port is not None and b.port is not None and r.port != b.port:
+            return (resolved or "").strip()
+        # Implicit default port on resolved, base has explicit port (typical IWA demo apps).
+        if r.port is None and b.port is not None:
+            fixed = r._replace(netloc=b.netloc)
+            return urlunparse(fixed)
+        return (resolved or "").strip()
+    except Exception:
+        return (resolved or "").strip()
+
+
 def _path_query(url: str, base_url: str = "") -> tuple[str, str]:
     try:
         from urllib.parse import urlparse
@@ -3852,7 +3887,8 @@ def _llm_decide(
         "Keys: action, candidate_id, text, url, evaluation_previous_goal, memory, next_goal.\n"
         "action: click|type|select|navigate|scroll_down|scroll_up|done. "
         "click/type/select: candidate_id=integer from BROWSER_STATE. "
-        "navigate: url=full URL (keep ?seed=X param). "
+        "navigate: url=path like /doctors?seed=1 OR full URL with SAME host:port as CURRENT URL "
+        "(never use http://localhost/ without the port shown in URL: line). "
         "done: only when task is fully completed.\n"
         "RULES: Copy values EXACTLY from TASK_CREDENTIALS/TASK_CONSTRAINTS (include trailing spaces). "
         "equals→type exact value. not_equals→use any OTHER value. contains→find item with that substring. "
@@ -4280,6 +4316,7 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
             return _resp([{"type": "WaitAction", "time_seconds": 1.0}], {"decision": "navigate_missing_url"})
 
         nav_url = _resolve_url(nav_url_raw, effective_url or str(url))
+        nav_url = _reconcile_nav_origin_with_base(nav_url, effective_url or str(url))
 
         if _same_path_query(nav_url, effective_url, base_a=effective_url, base_b=""):
             _update_task_state(task_id, str(url), "navigate_same_url_scroll")
@@ -4324,8 +4361,10 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
                 if isinstance(selector, dict) and selector.get("type") == "attributeValueSelector" and selector.get("attribute") == "href":
                     href = str(selector.get("value") or "")
                     fixed = _preserve_seed_url(href, effective_url or str(url))
-                    if fixed and fixed != href:
-                        fixed_abs = _resolve_url(fixed, effective_url or str(url))
+                    raw_abs = _resolve_url(fixed, effective_url or str(url))
+                    fixed_abs = _reconcile_nav_origin_with_base(raw_abs, effective_url or str(url))
+                    # Seed changed, or origin was corrected (e.g. http://localhost/... vs :8013)
+                    if fixed_abs and (fixed != href or fixed_abs != raw_abs):
                         if _same_path_query(fixed_abs, effective_url, base_a=effective_url, base_b=""):
                             _update_task_state(task_id, str(url), "navigate_seed_fix_same_url_scroll")
                             return _resp([{"type": "ScrollAction", "down": True, "up": False}], {"decision": "scroll_override"})

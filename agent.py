@@ -3928,12 +3928,23 @@ def _llm_decide(
 ) -> Dict[str, Any]:
     browser_state = _format_browser_state(candidates=candidates, prev_sig_set=prev_sig_set)
 
-    task_type = _classify_task(task)
-    playbook = _TASK_PLAYBOOKS.get(task_type, _TASK_PLAYBOOKS["GENERAL"])
-
     # Website detection
     website_name = _detect_website(url)
     website_ctx = _website_context(website_name)
+
+    task_type = _classify_task(task)
+    # AutoCalendar tasks often specify event fields (recurrence/reminders/attendees/etc.)
+    # without explicit "add event" phrasing; force event-form playbook in that case.
+    try:
+        t_low = (task or "").lower()
+        if website_name == "AutoCalendar" and any(
+            k in t_low for k in ("recurrence", "reminder", "attendees", "meeting_link", "calendar", "title", "date")
+        ):
+            if task_type in {"GENERAL", "SEARCH_SUBMIT", "CELL_CLICKED", "EVENT_WIZARD_OPEN"}:
+                task_type = "ADD_EVENT"
+    except Exception:
+        pass
+    playbook = _TASK_PLAYBOOKS.get(task_type, _TASK_PLAYBOOKS["GENERAL"])
 
     # Parse ALL constraints from the task
     task_constraints = _parse_task_constraints(task)
@@ -4276,6 +4287,26 @@ def _pick_actionable_recovery_candidate(task_text: str, candidates: List[_Candid
     return None
 
 
+def _pick_calendar_event_candidate(candidates: List[_Candidate]) -> Optional[_Candidate]:
+    cues = (
+        "add event", "new event", "create event", "+", "event",
+        "recurrence", "reminder", "attendee", "calendar",
+    )
+    for c in candidates:
+        tag = (c.tag or "").lower()
+        if tag not in {"button", "a", "input", "select", "textarea"}:
+            continue
+        blob = " ".join([
+            str(c.text or ""),
+            str(c.context or ""),
+            str(c.context_raw or ""),
+            " ".join(f"{k}:{v}" for k, v in (c.attrs or {}).items()),
+        ]).lower()
+        if any(k in blob for k in cues):
+            return c
+    return None
+
+
 # ---------------------------------------------------------------------------
 # HTTP entrypoint
 # ---------------------------------------------------------------------------
@@ -4306,6 +4337,7 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     dom_digest = _dom_digest(html)
     task = str(task or "")
     task_for_llm = task
+    website_name = _detect_website(str(url))
 
     candidates = _extract_candidates(html, max_candidates=80)
     candidates_all = list(candidates)
@@ -4451,6 +4483,12 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         )
 
     if action in {"scroll_down", "scroll_up"}:
+        if website_name == "AutoCalendar":
+            cal = _pick_calendar_event_candidate(candidates)
+            if cal is not None:
+                selector = cal.click_selector()
+                _update_task_state(task_id, str(url), f"click_calendar_recover:{_selector_repr(selector)}")
+                return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click_calendar_recover"})
         try:
             st4 = _TASK_STATE.get(task_id) if task_id else None
             same_url = isinstance(st4, dict) and str(st4.get("last_url") or "") == str(url)
@@ -4476,6 +4514,12 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         )
 
     if action == "wait":
+        if website_name == "AutoCalendar":
+            cal = _pick_calendar_event_candidate(candidates)
+            if cal is not None:
+                selector = cal.click_selector()
+                _update_task_state(task_id, str(url), f"click_calendar_wait_recover:{_selector_repr(selector)}")
+                return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click_calendar_wait_recover"})
         if _history_has_recent_timeout(history):
             rescue = _pick_actionable_recovery_candidate(task_for_llm, candidates) if candidates else None
             if rescue is not None:
@@ -4495,6 +4539,12 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         return _resp([{"type": "ScrollAction", "down": True, "up": False}], {"decision": "scroll_override", "model": decision.get("_meta", {}).get("model"), "llm": decision.get("_meta", {})})
 
     if action == "done":
+        if website_name == "AutoCalendar" and step_index <= 4:
+            cal = _pick_calendar_event_candidate(candidates)
+            if cal is not None:
+                selector = cal.click_selector()
+                _update_task_state(task_id, str(url), f"click_calendar_done_guard:{_selector_repr(selector)}")
+                return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click_calendar_done_guard"})
         # Avoid no-op termination too early when there is no clear progress.
         if step_index <= 1 and _history_no_progress(history):
             rescue = _pick_actionable_recovery_candidate(task_for_llm, candidates) if candidates else None

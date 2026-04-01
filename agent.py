@@ -1046,6 +1046,25 @@ def _history_no_progress(history: List[Dict[str, Any]] | None) -> bool:
     return True
 
 
+def _pick_non_repeating_click_candidate(task_id: str, candidates: List[_Candidate]) -> Optional[_Candidate]:
+    """Pick a clickable candidate different from the last repeated signature."""
+    if not candidates:
+        return None
+    last_sig = ""
+    try:
+        st = _TASK_STATE.get(task_id) if task_id else None
+        if isinstance(st, dict):
+            last_sig = str(st.get("last_sig") or "")
+    except Exception:
+        last_sig = ""
+    for c in candidates:
+        sel = c.click_selector()
+        sig = f"click:{_selector_repr(sel)}"
+        if sig != last_sig:
+            return c
+    return candidates[0]
+
+
 def _path_query(url: str, base_url: str = "") -> tuple[str, str]:
     try:
         from urllib.parse import urlparse
@@ -4387,6 +4406,7 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     return_metrics = os.getenv("AGENT_RETURN_METRICS", "0").lower() in {"1", "true", "yes"}
     use_task_knowledge = _env_flag("AGENT_USE_TASK_KNOWLEDGE", False)
     enable_rescue = _env_flag("AGENT_ENABLE_RESCUE", False)
+    enable_loop_breaker = _env_flag("AGENT_ENABLE_LOOP_BREAKER", True)
 
     # Hard step cap: force done after 10 steps to avoid over-cost
     max_steps_hard = int(os.getenv("AGENT_MAX_STEPS", "10"))
@@ -4519,6 +4539,19 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     if isinstance(cid, str) and cid.isdigit():
         cid = int(cid)
 
+    if enable_loop_breaker and task_id:
+        try:
+            st_loop = _TASK_STATE.get(task_id)
+            repeat = int(st_loop.get("repeat") or 0) if isinstance(st_loop, dict) else 0
+            if repeat >= 2 and candidates:
+                alt = _pick_non_repeating_click_candidate(task_id, candidates)
+                if alt is not None:
+                    selector = alt.click_selector()
+                    _update_task_state(task_id, str(url), f"click_loop_break:{_selector_repr(selector)}")
+                    return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click_loop_break"})
+        except Exception:
+            pass
+
     if action == "navigate":
         nav_url_raw = str(decision.get("url") or "").strip()
         if not nav_url_raw:
@@ -4609,7 +4642,8 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
             _update_task_state(task_id, str(url), f"click_override:{_selector_repr(selector)}")
             return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click", "candidate_id": int(cid) if isinstance(cid, int) else None, "model": decision.get("_meta", {}).get("model"), "llm": decision.get("_meta", {})})
         if candidates:
-            selector = candidates[0].click_selector()
+            alt = _pick_non_repeating_click_candidate(task_id, candidates)
+            selector = (alt.click_selector() if alt is not None else candidates[0].click_selector())
             _update_task_state(task_id, str(url), f"click_override:{_selector_repr(selector)}")
             return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click", "candidate_id": int(cid) if isinstance(cid, int) else None, "model": decision.get("_meta", {}).get("model"), "llm": decision.get("_meta", {})})
         _update_task_state(task_id, str(url), "scroll_override")
@@ -4623,7 +4657,7 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
                 _update_task_state(task_id, str(url), f"click_calendar_done_guard:{_selector_repr(selector)}")
                 return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click_calendar_done_guard"})
         # Avoid no-op termination too early when there is no clear progress.
-        if enable_rescue and step_index <= 1 and _history_no_progress(history):
+        if step_index <= 3 and _history_no_progress(history):
             rescue = _pick_actionable_recovery_candidate(task_for_llm, candidates) if candidates else None
             if rescue is not None:
                 selector = rescue.click_selector()
@@ -4631,6 +4665,14 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
                 return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click_done_guard"})
             _update_task_state(task_id, str(url), "wait_done_guard")
             return _resp([{"type": "WaitAction", "time_seconds": 1.0}], {"decision": "wait_done_guard"})
+        if _history_has_recent_timeout(history):
+            rescue = _pick_actionable_recovery_candidate(task_for_llm, candidates) if candidates else None
+            if rescue is not None:
+                selector = rescue.click_selector()
+                _update_task_state(task_id, str(url), f"click_done_timeout_guard:{_selector_repr(selector)}")
+                return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click_done_timeout_guard"})
+            _update_task_state(task_id, str(url), "wait_done_timeout_guard")
+            return _resp([{"type": "WaitAction", "time_seconds": 1.0}], {"decision": "wait_done_timeout_guard"})
         _update_task_state(task_id, str(url), "done")
         return _resp([{"type": "DoneAction", "success": True}], {"decision": "done", "candidate_id": int(cid) if isinstance(cid, int) else None, "model": decision.get("_meta", {}).get("model"), "llm": decision.get("_meta", {})})
 
@@ -4682,6 +4724,14 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         if action == "select":
             if not text:
                 raise HTTPException(status_code=400, detail="select action missing text")
+            # Some UIs use button/dropdown widgets; selecting on non-select elements times out.
+            if str(c.tag or "").lower() != "select":
+                selector = c.click_selector()
+                _update_task_state(task_id, str(url), f"click_select_fallback:{_selector_repr(selector)}")
+                return _resp(
+                    [{"type": "ClickAction", "selector": selector}],
+                    {"decision": "click_select_fallback", "candidate_id": int(cid) if isinstance(cid, int) else None, "model": decision.get("_meta", {}).get("model"), "llm": decision.get("_meta", {})},
+                )
             selector = c.type_selector()
             _update_task_state(task_id, str(url), f"select:{_selector_repr(selector)}")
             return _resp(

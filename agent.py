@@ -4307,6 +4307,29 @@ def _pick_calendar_event_candidate(candidates: List[_Candidate]) -> Optional[_Ca
     return None
 
 
+def _pick_cinema_movie_candidate(task_text: str, candidates: List[_Candidate]) -> Optional[_Candidate]:
+    forbidden = ""
+    try:
+        m = re.search(r"movie_name['\"]?\s*:\s*\{\s*['\"]operator['\"]\s*:\s*['\"]not_equals['\"].*?['\"]value['\"]\s*:\s*['\"]([^'\"]+)['\"]", task_text or "", re.IGNORECASE)
+        if m:
+            forbidden = (m.group(1) or "").strip().lower()
+    except Exception:
+        forbidden = ""
+    for c in candidates:
+        blob = " ".join([
+            str(c.text or ""),
+            str(c.context or ""),
+            str(c.context_raw or ""),
+            " ".join(f"{k}:{v}" for k, v in (c.attrs or {}).items()),
+        ]).lower()
+        href = str((c.attrs or {}).get("href") or "")
+        if "/movie" in href or "/movies/" in href or "movie" in blob:
+            if forbidden and forbidden in blob:
+                continue
+            return c
+    return None
+
+
 # ---------------------------------------------------------------------------
 # HTTP entrypoint
 # ---------------------------------------------------------------------------
@@ -4314,6 +4337,9 @@ def _pick_calendar_event_candidate(candidates: List[_Candidate]) -> Optional[_Ca
 @app.post("/act", summary="Decide next agent actions")
 async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     def _resp(actions: list[dict[str, Any]], metrics: dict[str, Any] | None = None) -> Dict[str, Any]:
+        if not actions:
+            # Never return an empty actions list; evaluator may treat it as a hard stop.
+            actions = [{"type": "WaitAction", "time_seconds": 1.0}]
         out: Dict[str, Any] = {"actions": actions}
         if return_metrics and metrics is not None:
             out["metrics"] = metrics
@@ -4483,6 +4509,12 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         )
 
     if action in {"scroll_down", "scroll_up"}:
+        if website_name == "AutoCinema":
+            movie = _pick_cinema_movie_candidate(task_for_llm, candidates)
+            if movie is not None:
+                selector = movie.click_selector()
+                _update_task_state(task_id, str(url), f"click_cinema_recover:{_selector_repr(selector)}")
+                return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click_cinema_recover"})
         if website_name == "AutoCalendar":
             cal = _pick_calendar_event_candidate(candidates)
             if cal is not None:

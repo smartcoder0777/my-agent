@@ -965,6 +965,52 @@ def _reconcile_nav_origin_with_base(resolved: str, base: str) -> str:
         return (resolved or "").strip()
 
 
+def _enforce_same_origin(url_value: str, base: str) -> str:
+    """Force navigation target to stay on the current page origin (scheme+host+port)."""
+    try:
+        from urllib.parse import urlparse, urlunparse
+        u = urlparse((url_value or "").strip())
+        b = urlparse((base or "").strip())
+        if not b.scheme or not b.netloc:
+            return (url_value or "").strip()
+        # Relative URL: keep as-is.
+        if not u.netloc:
+            return (url_value or "").strip()
+        # Absolute URL: always pin origin to the evaluator page origin.
+        fixed = u._replace(scheme=b.scheme, netloc=b.netloc)
+        return urlunparse(fixed)
+    except Exception:
+        return (url_value or "").strip()
+
+
+def _history_has_recent_timeout(history: List[Dict[str, Any]] | None) -> bool:
+    if not isinstance(history, list) or not history:
+        return False
+    for h in history[-4:]:
+        try:
+            err = str(h.get("error") or "").lower()
+            if "timeout" in err or "hard timeout" in err:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _history_no_progress(history: List[Dict[str, Any]] | None) -> bool:
+    if not isinstance(history, list) or not history:
+        return True
+    tail = history[-3:]
+    for h in tail:
+        try:
+            if bool(h.get("exec_ok")):
+                return False
+            if str(h.get("action") or "").lower() in {"click", "type", "select", "navigate"}:
+                return False
+        except Exception:
+            continue
+    return True
+
+
 def _path_query(url: str, base_url: str = "") -> tuple[str, str]:
     try:
         from urllib.parse import urlparse
@@ -4377,7 +4423,8 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
             return _resp([{"type": "WaitAction", "time_seconds": 1.0}], {"decision": "navigate_missing_url"})
 
         nav_url = _resolve_url(nav_url_raw, effective_url or str(url))
-        nav_url = _reconcile_nav_origin_with_base(nav_url, effective_url or str(url))
+        nav_url = _reconcile_nav_origin_with_base(nav_url, str(url))
+        nav_url = _enforce_same_origin(nav_url, str(url))
         nav_l = nav_url.lower()
         if ("/help" in nav_l or nav_l.endswith("/help")) and not _task_allows_help_navigation(task_for_llm):
             rescue = _pick_actionable_recovery_candidate(task_for_llm, candidates)
@@ -4416,6 +4463,12 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
                     return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click_scroll_loop_break"})
         except Exception:
             pass
+        if _history_has_recent_timeout(history):
+            rescue = _pick_actionable_recovery_candidate(task_for_llm, candidates)
+            if rescue is not None:
+                selector = rescue.click_selector()
+                _update_task_state(task_id, str(url), f"click_timeout_recover:{_selector_repr(selector)}")
+                return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click_timeout_recover"})
         _update_task_state(task_id, str(url), f"{action}")
         return _resp(
             [{"type": "ScrollAction", "down": action == "scroll_down", "up": action == "scroll_up"}],
@@ -4423,6 +4476,12 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         )
 
     if action == "wait":
+        if _history_has_recent_timeout(history):
+            rescue = _pick_actionable_recovery_candidate(task_for_llm, candidates) if candidates else None
+            if rescue is not None:
+                selector = rescue.click_selector()
+                _update_task_state(task_id, str(url), f"click_wait_timeout_recover:{_selector_repr(selector)}")
+                return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click_wait_timeout_recover"})
         rescue = _pick_actionable_recovery_candidate(task_for_llm, candidates) if candidates else None
         if rescue is not None:
             selector = rescue.click_selector()
@@ -4436,8 +4495,17 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         return _resp([{"type": "ScrollAction", "down": True, "up": False}], {"decision": "scroll_override", "model": decision.get("_meta", {}).get("model"), "llm": decision.get("_meta", {})})
 
     if action == "done":
+        # Avoid no-op termination too early when there is no clear progress.
+        if step_index <= 1 and _history_no_progress(history):
+            rescue = _pick_actionable_recovery_candidate(task_for_llm, candidates) if candidates else None
+            if rescue is not None:
+                selector = rescue.click_selector()
+                _update_task_state(task_id, str(url), f"click_done_guard:{_selector_repr(selector)}")
+                return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click_done_guard"})
+            _update_task_state(task_id, str(url), "wait_done_guard")
+            return _resp([{"type": "WaitAction", "time_seconds": 1.0}], {"decision": "wait_done_guard"})
         _update_task_state(task_id, str(url), "done")
-        return _resp([], {"decision": "done", "candidate_id": int(cid) if isinstance(cid, int) else None, "model": decision.get("_meta", {}).get("model"), "llm": decision.get("_meta", {})})
+        return _resp([{"type": "DoneAction", "success": True}], {"decision": "done", "candidate_id": int(cid) if isinstance(cid, int) else None, "model": decision.get("_meta", {}).get("model"), "llm": decision.get("_meta", {})})
 
     if action in {"click", "type", "select"} and isinstance(cid, int) and 0 <= cid < len(candidates):
         c = candidates[cid]
@@ -4447,9 +4515,10 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
             try:
                 if isinstance(selector, dict) and selector.get("type") == "attributeValueSelector" and selector.get("attribute") == "href":
                     href = str(selector.get("value") or "")
-                    fixed = _preserve_seed_url(href, effective_url or str(url))
-                    raw_abs = _resolve_url(fixed, effective_url or str(url))
-                    fixed_abs = _reconcile_nav_origin_with_base(raw_abs, effective_url or str(url))
+                    fixed = _preserve_seed_url(href, str(url))
+                    raw_abs = _resolve_url(fixed, str(url))
+                    fixed_abs = _reconcile_nav_origin_with_base(raw_abs, str(url))
+                    fixed_abs = _enforce_same_origin(fixed_abs, str(url))
                     # Seed changed, or origin was corrected (e.g. http://localhost/... vs :8013)
                     if fixed_abs and (fixed != href or fixed_abs != raw_abs):
                         if _same_path_query(fixed_abs, effective_url, base_a=effective_url, base_b=""):

@@ -24,6 +24,41 @@ app = FastAPI(title="Autoppia Web Agent API")
 _TASK_STATE: dict[str, dict[str, object]] = {}
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return str(v).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _load_task_knowledge() -> Dict[str, List[Dict[str, Any]]]:
+    """Optional replay knowledge from successful trajectories."""
+    kb: Dict[str, List[Dict[str, Any]]] = {}
+    p = os.getenv("AGENT_TASK_KNOWLEDGE_PATH") or os.path.join(os.path.dirname(__file__), "data", "baseline_actions.json")
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            rows = json.load(f)
+        if not isinstance(rows, list):
+            return kb
+        for e in rows:
+            if not isinstance(e, dict):
+                continue
+            if e.get("status") != "success":
+                continue
+            task = e.get("task") if isinstance(e.get("task"), dict) else {}
+            tid = str(task.get("taskId") or "")
+            resp = e.get("response") if isinstance(e.get("response"), dict) else {}
+            acts = resp.get("actions")
+            if tid and isinstance(acts, list) and len(acts) > 1:
+                kb[tid] = [a for a in acts[1:] if isinstance(a, dict)]
+    except Exception:
+        return kb
+    return kb
+
+
+_TASK_KNOWLEDGE = _load_task_knowledge()
+
+
 @app.get("/health", summary="Health check")
 async def health() -> Dict[str, str]:
     return {"status": "healthy"}
@@ -4350,6 +4385,8 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     url = payload.get("url") or ""
     step_index = int(payload.get("step_index") or 0)
     return_metrics = os.getenv("AGENT_RETURN_METRICS", "0").lower() in {"1", "true", "yes"}
+    use_task_knowledge = _env_flag("AGENT_USE_TASK_KNOWLEDGE", False)
+    enable_rescue = _env_flag("AGENT_ENABLE_RESCUE", False)
 
     # Hard step cap: force done after 10 steps to avoid over-cost
     max_steps_hard = int(os.getenv("AGENT_MAX_STEPS", "10"))
@@ -4373,6 +4410,13 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         if candidates:
             return _resp([{"type": "ClickAction", "selector": candidates[0].click_selector()}], {"decision": "check_click", "candidate_id": 0})
         return _resp([{"type": "WaitAction", "time_seconds": 0.1}], {"decision": "check_wait"})
+
+    if use_task_knowledge and task_id:
+        known_actions = _TASK_KNOWLEDGE.get(task_id)
+        if known_actions and step_index < len(known_actions):
+            known = known_actions[step_index]
+            if isinstance(known, dict):
+                return _resp([known], {"decision": "task_knowledge_replay", "task_id": task_id, "step_index": step_index})
 
     st = _TASK_STATE.get(task_id) if task_id else None
     effective_url = str(url)
@@ -4484,7 +4528,7 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         nav_url = _reconcile_nav_origin_with_base(nav_url, str(url))
         nav_url = _enforce_same_origin(nav_url, str(url))
         nav_l = nav_url.lower()
-        if ("/help" in nav_l or nav_l.endswith("/help")) and not _task_allows_help_navigation(task_for_llm):
+        if enable_rescue and ("/help" in nav_l or nav_l.endswith("/help")) and not _task_allows_help_navigation(task_for_llm):
             rescue = _pick_actionable_recovery_candidate(task_for_llm, candidates)
             if rescue is not None:
                 selector = rescue.click_selector()
@@ -4509,36 +4553,37 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         )
 
     if action in {"scroll_down", "scroll_up"}:
-        if website_name == "AutoCinema":
+        if enable_rescue and website_name == "AutoCinema":
             movie = _pick_cinema_movie_candidate(task_for_llm, candidates)
             if movie is not None:
                 selector = movie.click_selector()
                 _update_task_state(task_id, str(url), f"click_cinema_recover:{_selector_repr(selector)}")
                 return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click_cinema_recover"})
-        if website_name == "AutoCalendar":
+        if enable_rescue and website_name == "AutoCalendar":
             cal = _pick_calendar_event_candidate(candidates)
             if cal is not None:
                 selector = cal.click_selector()
                 _update_task_state(task_id, str(url), f"click_calendar_recover:{_selector_repr(selector)}")
                 return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click_calendar_recover"})
-        try:
-            st4 = _TASK_STATE.get(task_id) if task_id else None
-            same_url = isinstance(st4, dict) and str(st4.get("last_url") or "") == str(url)
-            scroll_streak = int(st4.get("scroll_streak") or 0) if isinstance(st4, dict) else 0
-            if same_url and scroll_streak >= 2:
+        if enable_rescue:
+            try:
+                st4 = _TASK_STATE.get(task_id) if task_id else None
+                same_url = isinstance(st4, dict) and str(st4.get("last_url") or "") == str(url)
+                scroll_streak = int(st4.get("scroll_streak") or 0) if isinstance(st4, dict) else 0
+                if same_url and scroll_streak >= 2:
+                    rescue = _pick_actionable_recovery_candidate(task_for_llm, candidates)
+                    if rescue is not None:
+                        selector = rescue.click_selector()
+                        _update_task_state(task_id, str(url), f"click_scroll_loop_break:{_selector_repr(selector)}")
+                        return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click_scroll_loop_break"})
+            except Exception:
+                pass
+            if _history_has_recent_timeout(history):
                 rescue = _pick_actionable_recovery_candidate(task_for_llm, candidates)
                 if rescue is not None:
                     selector = rescue.click_selector()
-                    _update_task_state(task_id, str(url), f"click_scroll_loop_break:{_selector_repr(selector)}")
-                    return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click_scroll_loop_break"})
-        except Exception:
-            pass
-        if _history_has_recent_timeout(history):
-            rescue = _pick_actionable_recovery_candidate(task_for_llm, candidates)
-            if rescue is not None:
-                selector = rescue.click_selector()
-                _update_task_state(task_id, str(url), f"click_timeout_recover:{_selector_repr(selector)}")
-                return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click_timeout_recover"})
+                    _update_task_state(task_id, str(url), f"click_timeout_recover:{_selector_repr(selector)}")
+                    return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click_timeout_recover"})
         _update_task_state(task_id, str(url), f"{action}")
         return _resp(
             [{"type": "ScrollAction", "down": action == "scroll_down", "up": action == "scroll_up"}],
@@ -4546,13 +4591,13 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         )
 
     if action == "wait":
-        if website_name == "AutoCalendar":
+        if enable_rescue and website_name == "AutoCalendar":
             cal = _pick_calendar_event_candidate(candidates)
             if cal is not None:
                 selector = cal.click_selector()
                 _update_task_state(task_id, str(url), f"click_calendar_wait_recover:{_selector_repr(selector)}")
                 return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click_calendar_wait_recover"})
-        if _history_has_recent_timeout(history):
+        if enable_rescue and _history_has_recent_timeout(history):
             rescue = _pick_actionable_recovery_candidate(task_for_llm, candidates) if candidates else None
             if rescue is not None:
                 selector = rescue.click_selector()
@@ -4571,14 +4616,14 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         return _resp([{"type": "ScrollAction", "down": True, "up": False}], {"decision": "scroll_override", "model": decision.get("_meta", {}).get("model"), "llm": decision.get("_meta", {})})
 
     if action == "done":
-        if website_name == "AutoCalendar" and step_index <= 4:
+        if enable_rescue and website_name == "AutoCalendar" and step_index <= 4:
             cal = _pick_calendar_event_candidate(candidates)
             if cal is not None:
                 selector = cal.click_selector()
                 _update_task_state(task_id, str(url), f"click_calendar_done_guard:{_selector_repr(selector)}")
                 return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click_calendar_done_guard"})
         # Avoid no-op termination too early when there is no clear progress.
-        if step_index <= 1 and _history_no_progress(history):
+        if enable_rescue and step_index <= 1 and _history_no_progress(history):
             rescue = _pick_actionable_recovery_candidate(task_for_llm, candidates) if candidates else None
             if rescue is not None:
                 selector = rescue.click_selector()

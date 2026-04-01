@@ -718,6 +718,27 @@ def _select_candidates_for_llm(task: str, candidates_all: List[_Candidate], curr
     if not candidates_all:
         return []
 
+    task_l = (task or "").lower()
+
+    def rank(c: _Candidate) -> float:
+        base = _score_candidate(task, c)
+        blob = " ".join([
+            str(c.text or ""),
+            str(c.context or ""),
+            str(c.context_raw or ""),
+            " ".join(f"{k}:{v}" for k, v in (c.attrs or {}).items()),
+        ]).lower()
+        # Small intent-aware boosts for common booking/form tasks.
+        if any(k in task_l for k in ("book", "reserve", "checkout", "confirm", "submit", "send")):
+            if any(k in blob for k in ("book", "reserve", "checkout", "confirm", "submit", "send", "continue", "next")):
+                base += 3.0
+        if any(k in task_l for k in ("date", "time", "guest", "people", "phone", "email", "subject")):
+            if any(k in blob for k in ("date", "time", "guest", "people", "phone", "email", "subject", "message", "name")):
+                base += 2.0
+        if c.tag in {"input", "textarea", "select"} and any(k in task_l for k in ("fill", "type", "enter", "set", "update")):
+            base += 1.5
+        return base
+
     controls = []
     primaries = []
     contextual = []
@@ -747,6 +768,11 @@ def _select_candidates_for_llm(task: str, candidates_all: List[_Candidate], curr
                 others.append(c)
             continue
         others.append(c)
+
+    controls.sort(key=rank, reverse=True)
+    primaries.sort(key=rank, reverse=True)
+    contextual.sort(key=rank, reverse=True)
+    others.sort(key=rank, reverse=True)
 
     picked = []
     seen = set()
@@ -4397,6 +4423,11 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         )
 
     if action == "wait":
+        rescue = _pick_actionable_recovery_candidate(task_for_llm, candidates) if candidates else None
+        if rescue is not None:
+            selector = rescue.click_selector()
+            _update_task_state(task_id, str(url), f"click_override:{_selector_repr(selector)}")
+            return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click", "candidate_id": int(cid) if isinstance(cid, int) else None, "model": decision.get("_meta", {}).get("model"), "llm": decision.get("_meta", {})})
         if candidates:
             selector = candidates[0].click_selector()
             _update_task_state(task_id, str(url), f"click_override:{_selector_repr(selector)}")
@@ -4463,7 +4494,8 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
             )
 
     if candidates and step_index < 5:
-        selector = candidates[0].click_selector()
+        rescue = _pick_actionable_recovery_candidate(task_for_llm, candidates)
+        selector = (rescue.click_selector() if rescue is not None else candidates[0].click_selector())
         _update_task_state(task_id, str(url), f"fallback_click:{_selector_repr(selector)}")
         return _resp(
             [{"type": "ClickAction", "selector": selector}],

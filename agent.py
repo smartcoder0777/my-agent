@@ -4105,6 +4105,11 @@ def _update_task_state(task_id: str, url: str, sig: str) -> None:
             st["repeat"] = int(st.get("repeat") or 0) + 1
         else:
             st["repeat"] = 0
+        sig_l = str(sig or "").lower()
+        if sig_l.startswith("scroll"):
+            st["scroll_streak"] = int(st.get("scroll_streak") or 0) + 1
+        else:
+            st["scroll_streak"] = 0
         st["last_sig"] = str(sig)
         st["last_url"] = str(url)
     except Exception:
@@ -4167,6 +4172,36 @@ def _compute_state_delta(
         return ", ".join(parts)
     except Exception:
         return ""
+
+
+def _task_allows_help_navigation(task_text: str) -> bool:
+    t = (task_text or "").lower()
+    return any(k in t for k in ("help page", "help category", "faq", "support", "/help", "contact support"))
+
+
+def _pick_actionable_recovery_candidate(task_text: str, candidates: List[_Candidate]) -> Optional[_Candidate]:
+    t = (task_text or "").lower()
+    task_cues = (
+        "reserve", "book", "booking", "hotel", "guest", "people",
+        "restaurant", "table", "date", "time", "confirm", "submit",
+    )
+    generic_cta = ("book", "reserve", "confirm", "continue", "next", "submit", "search", "apply")
+    for c in candidates:
+        tag = (c.tag or "").lower()
+        if tag not in {"button", "a", "input", "select", "textarea"}:
+            continue
+        blob = " ".join([
+            str(c.text or ""),
+            str(c.context or ""),
+            str(c.context_raw or ""),
+            " ".join(f"{k}:{v}" for k, v in (c.attrs or {}).items()),
+        ]).lower()
+        if any(k in t for k in task_cues):
+            if any(k in blob for k in task_cues + generic_cta):
+                return c
+        elif any(k in blob for k in generic_cta):
+            return c
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -4317,6 +4352,15 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
 
         nav_url = _resolve_url(nav_url_raw, effective_url or str(url))
         nav_url = _reconcile_nav_origin_with_base(nav_url, effective_url or str(url))
+        nav_l = nav_url.lower()
+        if ("/help" in nav_l or nav_l.endswith("/help")) and not _task_allows_help_navigation(task_for_llm):
+            rescue = _pick_actionable_recovery_candidate(task_for_llm, candidates)
+            if rescue is not None:
+                selector = rescue.click_selector()
+                _update_task_state(task_id, str(url), f"click_help_nav_guard:{_selector_repr(selector)}")
+                return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click_help_nav_guard"})
+            _update_task_state(task_id, str(url), "wait_help_nav_guard")
+            return _resp([{"type": "WaitAction", "time_seconds": 1.0}], {"decision": "wait_help_nav_guard"})
 
         if _same_path_query(nav_url, effective_url, base_a=effective_url, base_b=""):
             _update_task_state(task_id, str(url), "navigate_same_url_scroll")
@@ -4334,6 +4378,18 @@ async def act(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         )
 
     if action in {"scroll_down", "scroll_up"}:
+        try:
+            st4 = _TASK_STATE.get(task_id) if task_id else None
+            same_url = isinstance(st4, dict) and str(st4.get("last_url") or "") == str(url)
+            scroll_streak = int(st4.get("scroll_streak") or 0) if isinstance(st4, dict) else 0
+            if same_url and scroll_streak >= 2:
+                rescue = _pick_actionable_recovery_candidate(task_for_llm, candidates)
+                if rescue is not None:
+                    selector = rescue.click_selector()
+                    _update_task_state(task_id, str(url), f"click_scroll_loop_break:{_selector_repr(selector)}")
+                    return _resp([{"type": "ClickAction", "selector": selector}], {"decision": "click_scroll_loop_break"})
+        except Exception:
+            pass
         _update_task_state(task_id, str(url), f"{action}")
         return _resp(
             [{"type": "ScrollAction", "down": action == "scroll_down", "up": action == "scroll_up"}],
